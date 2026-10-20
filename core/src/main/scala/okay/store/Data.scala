@@ -63,14 +63,22 @@ object Where {
     case Json.Obj(fs) => fs.toList.flatMap { case (_, x) => leaves(x) }
     case other => List(Json.print(other))
   }
-  /** numbers by value, strings by text, the rest by their JSON; a missing value is less than any */
-  def compare(a: Option[Json], b: Option[Json]): Int = (a, b) match {
-    case (None, None) => 0
-    case (None, _) => -1
-    case (_, None) => 1
-    case (Some(Json.Num(x)), Some(Json.Num(y))) => x.compare(y)
-    case (Some(Json.Str(x)), Some(Json.Str(y))) => x.compare(y)
-    case (Some(x), Some(y)) => Json.print(x).compare(Json.print(y))
+  /** less and greater hold between values of one kind — numbers by value, strings by text, booleans false < true —
+   * and never for a missing value, a null, or two kinds, as SQL's NULL and a type mismatch compare to nothing */
+  def ordered(a: Json, b: Json): Option[Int] = (a, b) match {
+    case (Json.Num(x), Json.Num(y)) => Some(x.compare(y))
+    case (Json.Str(x), Json.Str(y)) => Some(x.compare(y))
+    case (Json.Bool(x), Json.Bool(y)) => Some(x.compare(y))
+    case _ => None
+  }
+  /** the order for sorting, total: missing and null first, then numbers, strings, booleans, the rest by their JSON text */
+  private def rank(v: Option[Json]): Int = v match { case None | Some(Json.Null) => 0; case Some(Json.Num(_)) => 1; case Some(Json.Str(_)) => 2; case Some(Json.Bool(_)) => 3; case _ => 4 }
+  def compare(a: Option[Json], b: Option[Json]): Int = rank(a).compare(rank(b)) match {
+    case 0 => (a, b) match {
+      case (Some(x), Some(y)) => ordered(x, y).getOrElse(if (rank(a) == 0) 0 else Json.print(x).compare(Json.print(y)))
+      case _ => 0
+    }
+    case c => c
   }
   /** THE REFERENCE SEMANTICS: what every backend's query must mean */
   def holds(w: Where, doc: Json): Boolean = w match {
@@ -78,8 +86,8 @@ object Where {
     case Eq(path, value) => at(doc, path).contains(value)
     case Contains(path, text) => val t = text.toLowerCase; at(doc, path).exists(v => leaves(v).exists(_.toLowerCase.contains(t)))
     case Has(path, value) => at(doc, path).exists { case Json.Arr(xs) => xs.contains(value); case _ => false }
-    case Less(path, than) => at(doc, path).exists(v => compare(Some(v), Some(than)) < 0)
-    case Greater(path, than) => at(doc, path).exists(v => compare(Some(v), Some(than)) > 0)
+    case Less(path, than) => at(doc, path).flatMap(ordered(_, than)).exists(_ < 0)
+    case Greater(path, than) => at(doc, path).flatMap(ordered(_, than)).exists(_ > 0)
     case And(all) => all.forall(holds(_, doc))
     case Or(any) => any.exists(holds(_, doc))
     case Not(x) => !holds(x, doc)

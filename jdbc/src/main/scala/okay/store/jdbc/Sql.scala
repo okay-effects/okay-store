@@ -11,32 +11,46 @@ import okay.store.{Data, Order, Where}
  * unchanged; a database is a dialect — the JSON extraction, the text search within, the array membership, the upsert.
  */
 final case class Dialect(name: String,
-                         /** the value at a path, as an expression over the column `doc` */ extract: List[String] => String,
-                         /** `Contains`: a condition with one `?`, the lowercased text, over the leaves under a path */ contains: List[String] => String,
-                         /** `Has`: a condition with one `?` over the array at a path */ has: List[String] => String,
-                         /** `Eq(path, Null)`: the value at the path is JSON's null — present, not missing */ isNull: List[String] => String,
-                         /** a table made where absent */ create: String => String,
-                         /** put or replace, `(?, ?)` the key and the document */ upsert: String => String)
+                         /** the value at a path within a JSON column, as an expression */ extract: (String, List[String]) => String,
+                         /** `Contains`: a condition with one `?`, the lowercased text, over the leaves at a path within a JSON column */ contains: (String, List[String]) => String,
+                         /** `Has`: a condition with one `?` over the array at a path within a JSON column */ has: (String, List[String]) => String,
+                         /** `Eq(path, Null)`: the value at the path within a JSON column is JSON's null — present, not missing */ isNull: (String, List[String]) => String,
+                         /** a table made where absent, its columns given as `"name" TYPE` */ create: (String, List[String]) => String,
+                         /** put or replace, the columns given, as many `?` */ upsert: (String, List[String]) => String,
+                         textType: String = "TEXT", integerType: String = "INTEGER", realType: String = "REAL")
 object Dialect {
   /** a JSON path, `$.a.b`, the root `$` */
   def jsonPath(path: List[String]): String = if (path.isEmpty) "$" else "$." + path.mkString(".")
-  /** SQLite with JSON1: `json_extract`, `json_tree` for the leaves within, `json_each` for an array's elements */
+  /** an identifier, quoted; a quote within is refused */
+  def quoted(name: String): String = { require(!name.contains('"'), s"an identifier has no quote: $name"); "\"" + name + "\"" }
+  /** a JSON value as the database compares it: a string, a whole number, a decimal, a boolean as 1/0, null */
+  def bind(v: Json): Any = v match {
+    case Json.Str(s) => s
+    case Json.Num(n) => if (n.isWhole && n.isValidLong) java.lang.Long.valueOf(n.toLong) else java.lang.Double.valueOf(n.toDouble)
+    case Json.Bool(b) => java.lang.Integer.valueOf(if (b) 1 else 0)
+    case Json.Null => None
+    case other => Json.print(other)
+  }
+  /** SQLite with JSON1: `json_extract`, `json_tree` for the leaves within, `json_each` for an array's elements,
+   * `json_type` for JSON's null as distinct from missing */
   val sqlite: Dialect = Dialect("sqlite",
-    extract = path => s"json_extract(doc, '${Dialect.jsonPath(path)}')",
-    contains = path => s"EXISTS (SELECT 1 FROM json_tree(doc, '${Dialect.jsonPath(path)}') WHERE type NOT IN ('object', 'array') AND instr(lower(value), ?) > 0)",
-    has = path => s"EXISTS (SELECT 1 FROM json_each(doc, '${Dialect.jsonPath(path)}') WHERE value = ?)",
-    isNull = path => s"json_type(doc, '${Dialect.jsonPath(path)}') = 'null'",
-    create = t => s"""CREATE TABLE IF NOT EXISTS "$t" (key TEXT PRIMARY KEY, doc TEXT NOT NULL)""",
-    upsert = t => s"""INSERT OR REPLACE INTO "$t" (key, doc) VALUES (?, ?)""")
+    extract = (col, path) => s"json_extract($col, '${jsonPath(path)}')",
+    contains = (col, path) => s"EXISTS (SELECT 1 FROM json_tree($col, '${jsonPath(path)}') WHERE type NOT IN ('object', 'array') AND instr(lower(value), ?) > 0)",
+    has = (col, path) => s"EXISTS (SELECT 1 FROM json_each($col, '${jsonPath(path)}') WHERE value = ?)",
+    isNull = (col, path) => s"json_type($col, '${jsonPath(path)}') = 'null'",
+    create = (t, cols) => s"CREATE TABLE IF NOT EXISTS ${quoted(t)} (${cols.mkString(", ")})",
+    upsert = (t, cols) => s"INSERT OR REPLACE INTO ${quoted(t)} (${cols.map(quoted).mkString(", ")}) VALUES (${cols.map(_ => "?").mkString(", ")})")
   /** PostgreSQL, a sketch, UNCHECKED: `jsonb` paths; `Contains` over the subtree's text, so a key's name matches too,
    * unlike the reference — a `jsonb_path` form would mend it */
   val postgres: Dialect = Dialect("postgres",
-    extract = path => s"(doc::jsonb #>> '{${path.mkString(",")}}')",
-    contains = path => s"position(? in lower(doc::jsonb #>> '{${path.mkString(",")}}')) > 0",
-    has = path => s"((doc::jsonb #> '{${path.mkString(",")}}') @> to_jsonb(?))",
-    isNull = path => s"(doc::jsonb #> '{${path.mkString(",")}}') = 'null'::jsonb",
-    create = t => s"""CREATE TABLE IF NOT EXISTS "$t" (key TEXT PRIMARY KEY, doc TEXT NOT NULL)""",
-    upsert = t => s"""INSERT INTO "$t" (key, doc) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET doc = EXCLUDED.doc""")
+    extract = (col, path) => s"($col::jsonb #>> '{${path.mkString(",")}}')",
+    contains = (col, path) => s"position(? in lower($col::jsonb #>> '{${path.mkString(",")}}')) > 0",
+    has = (col, path) => s"(($col::jsonb #> '{${path.mkString(",")}}') @> to_jsonb(?))",
+    isNull = (col, path) => s"($col::jsonb #> '{${path.mkString(",")}}') = 'null'::jsonb",
+    create = (t, cols) => s"CREATE TABLE IF NOT EXISTS ${quoted(t)} (${cols.mkString(", ")})",
+    upsert = (t, cols) => s"INSERT INTO ${quoted(t)} (${cols.map(quoted).mkString(", ")}) VALUES (${cols.map(_ => "?").mkString(", ")}) ON CONFLICT (${quoted(cols.head)}) DO UPDATE SET " +
+      cols.tail.map(c => s"${quoted(c)} = EXCLUDED.${quoted(c)}").mkString(", "),
+    integerType = "BIGINT", realType = "DOUBLE PRECISION")
 }
 
 class Sqls[F <: Effects](implicit implementation: F) {
@@ -49,25 +63,19 @@ class Sqls[F <: Effects](implicit implementation: F) {
     private val made = scala.collection.mutable.Set.empty[String]
     private def table(collection: String): String = {
       val t = Data.named(collection)
-      if (!made(t)) { update(c, dialect.create(t)); made += t }
+      if (!made(t)) { update(c, dialect.create(t, List(s"${Dialect.quoted("key")} ${dialect.textType} PRIMARY KEY", s"${Dialect.quoted("doc")} ${dialect.textType} NOT NULL"))); made += t }
       t
     }
-    /** a JSON value as the database compares it: a string, a whole number, a decimal, a boolean as 1/0 */
-    private def bind(v: Json): Any = v match {
-      case Json.Str(s) => s
-      case Json.Num(n) => if (n.isWhole && n.isValidLong) java.lang.Long.valueOf(n.toLong) else java.lang.Double.valueOf(n.toDouble)
-      case Json.Bool(b) => java.lang.Integer.valueOf(if (b) 1 else 0)
-      case other => Json.print(other)
-    }
+    import Dialect.bind
     /** a `Where` as a condition and its parameters, in order */
     def condition(w: Where): (String, List[Any]) = w match {
       case Where.All => ("1 = 1", Nil)
-      case Where.Eq(p, Json.Null) => (dialect.isNull(p), Nil)
-      case Where.Eq(p, v) => (s"${dialect.extract(p)} = ?", List(bind(v)))
-      case Where.Contains(p, t) => (dialect.contains(p), List(t.toLowerCase))
-      case Where.Has(p, v) => (dialect.has(p), List(bind(v)))
-      case Where.Less(p, v) => (s"${dialect.extract(p)} < ?", List(bind(v)))
-      case Where.Greater(p, v) => (s"${dialect.extract(p)} > ?", List(bind(v)))
+      case Where.Eq(p, Json.Null) => (dialect.isNull("doc", p), Nil)
+      case Where.Eq(p, v) => (s"${dialect.extract("doc", p)} = ?", List(bind(v)))
+      case Where.Contains(p, t) => (dialect.contains("doc", p), List(t.toLowerCase))
+      case Where.Has(p, v) => (dialect.has("doc", p), List(bind(v)))
+      case Where.Less(p, v) => (s"${dialect.extract("doc", p)} < ?", List(bind(v)))
+      case Where.Greater(p, v) => (s"${dialect.extract("doc", p)} > ?", List(bind(v)))
       case Where.And(Nil) => ("1 = 1", Nil)
       case Where.And(all) => val cs = all.map(condition); (cs.map(x => s"(${x._1})").mkString(" AND "), cs.flatMap(_._2))
       case Where.Or(Nil) => ("1 = 0", Nil)
@@ -75,7 +83,7 @@ class Sqls[F <: Effects](implicit implementation: F) {
       case Where.Not(x) => val (sql, ps) = condition(x); (s"NOT ($sql)", ps)
     }
     private def ordering(order: List[Order]): String =
-      if (order.isEmpty) "" else " ORDER BY " + order.map(o => dialect.extract(o.path) + (if (o.descending) " DESC" else " ASC")).mkString(", ")
+      if (order.isEmpty) "" else " ORDER BY " + order.map(o => dialect.extract("doc", o.path) + (if (o.descending) " DESC" else " ASC")).mkString(", ")
     private def doc(text: String): Json = Descent.parse(text).fold(e => throw new IllegalStateException(s"a document in the database does not parse: ${e.message}"), j => j)
 
     def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Data, R, Rest]): A ! Rest =
@@ -83,7 +91,7 @@ class Sqls[F <: Effects](implicit implementation: F) {
         def ret(a: A) = pure(a)
         def answer[X](op: Data[X]): X = op match {
           case Data.Get(col, key, k) => k(rows(c, s"""SELECT doc FROM "${table(col)}" WHERE key = ?""", key)(rs => doc(rs.getString(1))).headOption)
-          case Data.Put(col, key, d, k) => update(c, dialect.upsert(table(col)), key, Json.print(d)); k(())
+          case Data.Put(col, key, d, k) => update(c, dialect.upsert(table(col), List("key", "doc")), key, Json.print(d)); k(())
           case Data.Delete(col, key, k) => update(c, s"""DELETE FROM "${table(col)}" WHERE key = ?""", key); k(())
           case Data.Query(col, w, o, l, k) =>
             val (cond, params) = condition(w)

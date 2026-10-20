@@ -88,6 +88,50 @@ abstract class AgreementChecks(val fx0: Runner, name: String) extends munit.FunS
     val out = try fx0.run(sqls.on(c)(mappings.onData(Shop.customer)[DC, D, Shop.Out](mappings.onData(Shop.sale)[DCS, DC, Shop.Out](shop.program[DCS])))) finally c.close()
     assertEquals(out, Shop.expected)
   }
+  test(s"$name: a table per type: the same answers as in memory; the table has the shape's columns") {
+    val shop = new Shop.Of[fx0.type](fx0)
+    val tables: Tables[fx0.type] = new Tables[fx0.type]()(fx0)
+    type C[X] = Sum[Void, shop.Cs, X]
+    type CS[X] = Sum[C, shop.Ss, X]
+    val c = Sqlite.connect(":memory:")
+    try {
+      val out = fx0.run(tables.on(Shop.customer, c)[C, Void, Shop.Out](tables.on(Shop.sale, c)[CS, C, Shop.Out](shop.program[CS])))
+      assertEquals(out, Shop.expected)
+      assertEquals(Jdbc.query(c, "PRAGMA table_info(sales)")(rs => (rs.getString(2), rs.getString(3))), List(("_key", "TEXT"), ("id", "TEXT"), ("customer", "TEXT"), ("item", "TEXT"), ("qty", "INTEGER")))
+      assertEquals(Jdbc.query(c, "SELECT item, qty FROM sales WHERE customer = 'ann' ORDER BY qty DESC")(rs => (rs.getString(1), rs.getInt(2))), List(("green tea", 5), ("tea", 1)), "readable by the database's own tools")
+    } finally c.close()
+  }
+  test(s"$name: a table per type with optional, date, boolean and nested fields: round trip, null, a path within, the text within everything") {
+    import okay.effects.shape.{Day, Shape}
+    import okay.effects.shape.Shape.{bool, date, field, int, record, text}
+    final case class Address(city: String, lines: List[String])
+    final case class Person(id: String, name: String, born: Option[Day], vip: Boolean, score: Option[Int], address: Option[Address], tags: List[String])
+    val address: Shape[Address] = record(field("city", text), field("lines", text.many()))(Address(_, _))(a => (a.city, a.lines))
+    val person: Mapping[Person] = Mapping("people", record(field("id", text), field("name", text), field("born", date.optional), field("vip", bool), field("score", int.optional),
+      field("address", address.optional), field("tags", text.many()))(Person(_, _, _, _, _, _, _))(p => (p.id, p.name, p.born, p.vip, p.score, p.address, p.tags)), _.id)
+    val mappings: Mappings[fx0.type] = new Mappings[fx0.type]()(fx0)
+    val tables: Tables[fx0.type] = new Tables[fx0.type]()(fx0)
+    import mappings._
+    type P[X] = Sum[Void, ({ type L[X] = Mapped[Person, X] })#L, X]
+    type DP[X] = Sum[D, ({ type L[X] = Mapped[Person, X] })#L, X]
+    val ann = Person("ann", "Ann", Some(Day(1990, 5, 6)), vip = true, Some(7), Some(Address("Kyiv", List("Main 1", "flat 2"))), List("x", "y"))
+    val bo = Person("bo", "Bo", None, vip = false, None, None, Nil)
+    def program[R[_]](implicit in: In[({ type L[X] = Mapped[Person, X] })#L, R]) = for {
+      _ <- save[Person, R](ann); _ <- save[Person, R](bo)
+      a <- load[Person, R]("ann"); b <- load[Person, R]("bo")
+      noBorn <- find[Person, R](Field("born").isNull); vips <- find[Person, R](Field("vip") is true)
+      kyiv <- find[Person, R](Field("address") / "city" is "Kyiv"); flat <- find[Person, R](Field("address") / "lines" contains "FLAT")
+      tagged <- find[Person, R](Field("tags") has "y"); anywhere <- find[Person, R](Field() contains "main")
+      young <- find[Person, R](Field("born") > "1980-01-01", List(Field("name").desc)); scored <- count[Person, R](Field("score") < 10)
+      nobody <- find[Person, R](Field("zzz") is 1)
+    } yield (a, b, noBorn, vips, kyiv, flat, tagged, anywhere, young, scored, nobody)
+    val expected = (Some(ann), Some(bo), List(bo), List(ann), List(ann), List(ann), List(ann), List(ann), List(ann), 1L, Nil)
+    val (_, inMemory) = fx0.run(mappings.datas.inMemory()(onData(person)[DP, D, (Option[Person], Option[Person], List[Person], List[Person], List[Person], List[Person], List[Person], List[Person], List[Person], Long, List[Person])](program[DP])))
+    assertEquals(inMemory, expected)
+    val c = Sqlite.connect(":memory:")
+    val onTable = try fx0.run(tables.on(person, c)[P, Void, (Option[Person], Option[Person], List[Person], List[Person], List[Person], List[Person], List[Person], List[Person], List[Person], Long, List[Person])](program[P])) finally c.close()
+    assertEquals(onTable, expected)
+  }
 }
 class AgreementOnMachine extends AgreementChecks(Machine, "machine")
 class AgreementOnFree extends AgreementChecks(Free, "free")

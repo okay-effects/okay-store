@@ -55,6 +55,9 @@ object Mapped {
   final case class Remove[A, X](key: String, answer: Unit => X) extends Mapped[A, X]
   final case class Find[A, X](where: Where, order: List[Order], limit: Option[Int], answer: List[A] => X) extends Mapped[A, X]
   final case class Count[A, X](where: Where, answer: Long => X) extends Mapped[A, X]
+  /** a value made with a key from the store and kept: `create(key => Sale(key, ...))` — the key the store's, never
+   * given twice; the value's own `key` is expected to be it */
+  final case class Create[A, X](make: String => A, answer: A => X) extends Mapped[A, X]
 }
 
 /** a path into a document, for a `Where` that reads: `field("qty") > 3`, `field("item") contains "tea"` */
@@ -101,6 +104,8 @@ class Mappings[F <: Effects](implicit implementation: F) {
   def all[A, R[_]](order: List[Order] = Nil)(implicit in: In[({ type L[X] = Mapped[A, X] })#L, R]): List[A] ! R = find[A, R](Where.All, order)
   def count[A, R[_]](where: Where = Where.All)(implicit in: In[({ type L[X] = Mapped[A, X] })#L, R]): Long ! R =
     perform[({ type L[X] = Mapped[A, X] })#L].apply[R, Long](Mapped.Count[A, Long](where, x => x))
+  def create[A, R[_]](make: String => A)(implicit in: In[({ type L[X] = Mapped[A, X] })#L, R]): A ! R =
+    perform[({ type L[X] = Mapped[A, X] })#L].apply[R, A](Mapped.Create[A, A](make, x => x))
 
   /** THE HANDLER, one for every type: the mapping's effect onto `Data` — a save a put of the encoded value by its
    * key, a find a query decoded by the shape — so the type is in whatever handles `Data` next */
@@ -116,6 +121,7 @@ class Mappings[F <: Effects](implicit implementation: F) {
           case Mapped.Remove(key, answer) => datas.delete[Rest](m.collection, key).flatMap(_ => k(answer(())))
           case Mapped.Find(w, o, l, answer) => datas.query[Rest](m.collection, w, o, l).flatMap(ds => k(answer(ds.map { case (key, d) => m.decode(key, d) })))
           case Mapped.Count(w, answer) => datas.count[Rest](m.collection, w).flatMap(n => k(answer(n)))
+          case Mapped.Create(make, answer) => datas.fresh[Rest](m.collection).flatMap { key => val a = make(key); datas.put[Rest](m.collection, m.key(a), m.shape.encode(a)).flatMap(_ => k(answer(a))) }
         }
       })
   }

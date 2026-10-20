@@ -22,6 +22,11 @@ object Data {
   /** the documents that match, in order, at most `limit`, each with its key */
   final case class Query[X](collection: String, where: Where, order: List[Order], limit: Option[Int], answer: List[(String, Json)] => X) extends Data[X]
   final case class Count[X](collection: String, where: Where, answer: Long => X) extends Data[X]
+  /** A KEY FROM THE STORE: the next of the collection's own sequence, never given twice — "000000000001", so keys sort
+   * as they were given; the backend keeps the count where it keeps everything else */
+  final case class Fresh[X](collection: String, answer: String => X) extends Data[X]
+  /** a key as the store gives it: the sequence's number, twelve digits */
+  def key(n: Long): String = f"$n%012d"
 
   /** a collection's name: letters, digits and underscores, so it is a table's and a file's as it is */
   def named(collection: String): String =
@@ -134,6 +139,7 @@ class Datas[F <: Effects](implicit implementation: F) {
   def query[R[_]](collection: String, where: Where = Where.All, order: List[Order] = Nil, limit: Option[Int] = None)(implicit in: In[Data, R]): List[(String, Json)] ! R =
     perform[Data].apply[R, List[(String, Json)]](Data.Query(collection, where, order, limit, x => x))
   def count[R[_]](collection: String, where: Where = Where.All)(implicit in: In[Data, R]): Long ! R = perform[Data].apply[R, Long](Data.Count(collection, where, x => x))
+  def fresh[R[_]](collection: String)(implicit in: In[Data, R]): String ! R = perform[Data].apply[R, String](Data.Fresh(collection, x => x))
 
   /** A TYPED COLLECTION: documents of a shape, keyed by a function of the value — the words a domain's handler is
    * written in. What is in the store and does not read by the shape is the store's fault, not a problem for a form */
@@ -148,6 +154,8 @@ class Datas[F <: Effects](implicit implementation: F) {
   def remove[A, R[_]](c: Collection[A], key: String)(implicit in: In[Data, R]): Unit ! R = delete[R](c.name, key)
   def select[A, R[_]](c: Collection[A], where: Where = Where.All, order: List[Order] = Nil, limit: Option[Int] = None)(implicit in: In[Data, R]): List[A] ! R =
     query[R](c.name, where, order, limit).map(_.map { case (k, d) => c.decode(k, d) })
+  /** a value made with a key from the store, kept: `add(c, key => Sale(key, ...))` */
+  def add[A, R[_]](c: Collection[A], make: String => A)(implicit in: In[Data, R]): A ! R = fresh[R](c.name).flatMap { k => val a = make(k); keep[A, R](c, a).map(_ => a) }
 
   // ---- THE BACKENDS of no platform: memory, and lines appended to files
   /** in memory: the collections in a cell, answered in place */
@@ -160,6 +168,11 @@ class Datas[F <: Effects](implicit implementation: F) {
           def answer[X](cell: Cell[Map[String, Map[String, Json]]], op: Data[X]): X = {
             def docs(c: String) = cell.get.getOrElse(Data.named(c), Map.empty[String, Json])
             op match {
+              case Data.Fresh(c, answer) =>
+                // the sequences in a collection of their own, "_keys", a name no collection may take
+                val keys = cell.get.getOrElse("_keys", Map.empty[String, Json])
+                val next = keys.get(Data.named(c)).flatMap(Where.at(_, List("next"))).collect { case Json.Num(n) => n.toLong }.getOrElse(0L) + 1
+                cell.set(cell.get.updated("_keys", keys.updated(c, Json.obj("next" -> Json.num(next))))); answer(Data.key(next))
               case Data.Get(c, k, answer) => answer(docs(c).get(k))
               case Data.Put(c, k, d, answer) => cell.set(cell.get.updated(c, docs(c).updated(k, d))); answer(())
               case Data.Delete(c, k, answer) => cell.set(cell.get.updated(c, docs(c) - k)); answer(())
@@ -186,10 +199,20 @@ class Datas[F <: Effects](implicit implementation: F) {
         case _ => m
       }
     }
+    /** the sequences: a line per key given, `{"collection": c, "next": n}`, the last of a collection its count */
+    private def nextOf(c: String): Long = read("_keys.jsonl").foldLeft(0L) { (n, line) =>
+      Descent.parse(line).toOption match {
+        case Some(o: Json.Obj) if o.get("collection").contains(Json.Str(c)) => o.get("next").collect { case Json.Num(x) => x.toLong }.getOrElse(n)
+        case _ => n
+      }
+    }
     def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Data, R, Rest]): A ! Rest =
       handle[Data, R, Rest, A, A](p, new TailHandler[Data, Rest, A, A] {
         def ret(a: A) = pure(a)
         def answer[X](op: Data[X]): X = op match {
+          case Data.Fresh(c, answer) =>
+            val next = nextOf(Data.named(c)) + 1
+            append("_keys.jsonl", Json.print(Json.obj("collection" -> Json.Str(c), "next" -> Json.num(next)))); answer(Data.key(next))
           case Data.Get(c, k, answer) => answer(docs(c).get(k))
           case Data.Put(c, k, d, answer) => append(file(c), Json.print(Json.obj("key" -> Json.Str(k), "doc" -> d))); answer(())
           case Data.Delete(c, k, answer) => append(file(c), Json.print(Json.obj("key" -> Json.Str(k), "gone" -> Json.Bool(true)))); answer(())

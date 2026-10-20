@@ -17,6 +17,7 @@ final case class Dialect(name: String,
                          /** `Eq(path, Null)`: the value at the path within a JSON column is JSON's null — present, not missing */ isNull: (String, List[String]) => String,
                          /** a table made where absent, its columns given as `"name" TYPE` */ create: (String, List[String]) => String,
                          /** put or replace, the columns given, as many `?` */ upsert: (String, List[String]) => String,
+                         /** the next of a collection's sequence, one `?` the collection, the number returned; the table `_keys (collection, next)` */ fresh: String => String,
                          textType: String = "TEXT", integerType: String = "INTEGER", realType: String = "REAL")
 object Dialect {
   /** a JSON path, `$.a.b`, the root `$` */
@@ -39,7 +40,8 @@ object Dialect {
     has = (col, path) => s"EXISTS (SELECT 1 FROM json_each($col, '${jsonPath(path)}') WHERE value = ?)",
     isNull = (col, path) => s"json_type($col, '${jsonPath(path)}') = 'null'",
     create = (t, cols) => s"CREATE TABLE IF NOT EXISTS ${quoted(t)} (${cols.mkString(", ")})",
-    upsert = (t, cols) => s"INSERT OR REPLACE INTO ${quoted(t)} (${cols.map(quoted).mkString(", ")}) VALUES (${cols.map(_ => "?").mkString(", ")})")
+    upsert = (t, cols) => s"INSERT OR REPLACE INTO ${quoted(t)} (${cols.map(quoted).mkString(", ")}) VALUES (${cols.map(_ => "?").mkString(", ")})",
+    fresh = t => s"INSERT INTO ${quoted(t)} (collection, next) VALUES (?, 1) ON CONFLICT (collection) DO UPDATE SET next = next + 1 RETURNING next")
   /** PostgreSQL, a sketch, UNCHECKED: `jsonb` paths; `Contains` over the subtree's text, so a key's name matches too,
    * unlike the reference — a `jsonb_path` form would mend it */
   val postgres: Dialect = Dialect("postgres",
@@ -50,7 +52,14 @@ object Dialect {
     create = (t, cols) => s"CREATE TABLE IF NOT EXISTS ${quoted(t)} (${cols.mkString(", ")})",
     upsert = (t, cols) => s"INSERT INTO ${quoted(t)} (${cols.map(quoted).mkString(", ")}) VALUES (${cols.map(_ => "?").mkString(", ")}) ON CONFLICT (${quoted(cols.head)}) DO UPDATE SET " +
       cols.tail.map(c => s"${quoted(c)} = EXCLUDED.${quoted(c)}").mkString(", "),
+    fresh = t => s"INSERT INTO ${quoted(t)} (collection, next) VALUES (?, 1) ON CONFLICT (collection) DO UPDATE SET next = ${quoted(t)}.next + 1 RETURNING next",
     integerType = "BIGINT", realType = "DOUBLE PRECISION")
+  /** the sequences' table and the next of one: shared by `Data` on SQL and a table per type */
+  def keysTable(c: java.sql.Connection, dialect: Dialect): Unit = {
+    Jdbc.update(c, dialect.create("_keys", List(s"${quoted("collection")} ${dialect.textType} PRIMARY KEY", s"${quoted("next")} ${dialect.integerType} NOT NULL"))); ()
+  }
+  def fresh(c: java.sql.Connection, dialect: Dialect, collection: String): String =
+    Data.key(Jdbc.query(c, dialect.fresh("_keys"), collection)(_.getLong(1)).head)
 }
 
 class Sqls[F <: Effects](implicit implementation: F) {
@@ -61,6 +70,7 @@ class Sqls[F <: Effects](implicit implementation: F) {
   final class On(c: Connection, dialect: Dialect) {
     import Jdbc.{query => rows, update}
     private val made = scala.collection.mutable.Set.empty[String]
+    private lazy val keys: Unit = Dialect.keysTable(c, dialect)
     private def table(collection: String): String = {
       val t = Data.named(collection)
       if (!made(t)) { update(c, dialect.create(t, List(s"${Dialect.quoted("key")} ${dialect.textType} PRIMARY KEY", s"${Dialect.quoted("doc")} ${dialect.textType} NOT NULL"))); made += t }
@@ -90,6 +100,7 @@ class Sqls[F <: Effects](implicit implementation: F) {
       handle[Data, R, Rest, A, A](p, new TailHandler[Data, Rest, A, A] {
         def ret(a: A) = pure(a)
         def answer[X](op: Data[X]): X = op match {
+          case Data.Fresh(col, k) => keys; k(Dialect.fresh(c, dialect, Data.named(col)))
           case Data.Get(col, key, k) => k(rows(c, s"""SELECT doc FROM "${table(col)}" WHERE key = ?""", key)(rs => doc(rs.getString(1))).headOption)
           case Data.Put(col, key, d, k) => update(c, dialect.upsert(table(col), List("key", "doc")), key, Json.print(d)); k(())
           case Data.Delete(col, key, k) => update(c, s"""DELETE FROM "${table(col)}" WHERE key = ?""", key); k(())

@@ -43,7 +43,7 @@ class Tables[F <: Effects](implicit implementation: F) {
     }
     private val byName: Map[String, Column] = columns.map(c => c.name -> c).toMap
     val table: String = m.collection
-    private lazy val made: Unit = { update(c, dialect.create(table, s"${quoted("_key")} ${dialect.textType} PRIMARY KEY" :: columns.map(col => s"${col.sql} ${col.sqlType}"))); () }
+    private lazy val made: Unit = { update(c, dialect.create(table, s"${quoted("_key")} ${dialect.textType} PRIMARY KEY" :: columns.map(col => s"${col.sql} ${col.sqlType}"))); Dialect.keysTable(c, dialect) }
 
     /** the row of a value: its key, then each column's value as the database takes it */
     private def row(a: A): List[Any] = {
@@ -132,6 +132,9 @@ class Tables[F <: Effects](implicit implementation: F) {
           case Mapped.Count(w, k) =>
             val (cond, params) = condition(w)
             k(rows(c, s"SELECT COUNT(*) FROM ${quoted(table)} WHERE $cond", params: _*)(_.getLong(1)).head)
+          case Mapped.Create(make, k) =>
+            val a = make(Dialect.fresh(c, dialect, table))
+            update(c, dialect.upsert(table, "_key" :: columns.map(_.name)), row(a): _*); k(a)
         } }
       })
   }

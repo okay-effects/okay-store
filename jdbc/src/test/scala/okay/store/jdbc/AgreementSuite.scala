@@ -132,6 +132,27 @@ abstract class AgreementChecks(val fx0: Runner, name: String) extends munit.FunS
     val onTable = try fx0.run(tables.on(person, c)[P, Void, (Option[Person], Option[Person], List[Person], List[Person], List[Person], List[Person], List[Person], List[Person], List[Person], Long, List[Person])](program[P])) finally c.close()
     assertEquals(onTable, expected)
   }
+  test(s"$name: keys from the store on SQL: Data on SQL and a table per type give the next of the collection's sequence, kept across connections") {
+    val shop = new Shop.Of[fx0.type](fx0)
+    import shop.mappings
+    type DS[X] = Sum[D, shop.Ss, X]
+    type S2[X] = Sum[Void, shop.Ss, X]
+    def program[R[_]](implicit in: In[shop.Ss, R]) = for {
+      a <- mappings.create[Sale, R](k => Sale(k, "ann", "tea", 1)); _ <- mappings.remove[Sale, R](a.id); b <- mappings.create[Sale, R](k => Sale(k, "bo", "coffee", 2))
+    } yield (a.id, b.id)
+    val f = java.io.File.createTempFile("okay-store", ".db"); f.delete()
+    val c1 = Sqlite.connect(f.getPath)
+    val viaData = try fx0.run(sqls.on(c1)(mappings.onData(Shop.sale)[DS, D, (String, String)](program[DS]))) finally c1.close()
+    assertEquals(viaData, ("000000000001", "000000000002"))
+    val c2 = Sqlite.connect(f.getPath)
+    val again = try fx0.run(sqls.on(c2)(mappings.onData(Shop.sale)[DS, D, (String, String)](program[DS]))) finally c2.close()
+    assertEquals(again, ("000000000003", "000000000004"), "the sequence is the database's, not the connection's")
+    val tables: Tables[fx0.type] = new Tables[fx0.type]()(fx0)
+    val c3 = Sqlite.connect(":memory:")
+    val viaTable = try fx0.run(tables.on(Shop.sale, c3)[S2, Void, (String, String)](program[S2])) finally c3.close()
+    assertEquals(viaTable, ("000000000001", "000000000002"))
+    f.delete()
+  }
 }
 class AgreementOnMachine extends AgreementChecks(Machine, "machine")
 class AgreementOnFree extends AgreementChecks(Free, "free")

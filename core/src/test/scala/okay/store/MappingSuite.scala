@@ -135,6 +135,24 @@ abstract class MappingChecks(val fx0: Runner, name: String) extends munit.FunSui
     assert(compileErrors("""Shop.sale.at("qty") is "x"""").nonEmpty, "a value of another type than the field's does not compile")
     assert(compileErrors("""who.at("tags") has 1""").nonEmpty, "an element of another type does not compile")
   }
+  test("keys from the store: create makes a value with the next key of the collection, never the same, in memory and on lines alike") {
+    type DS[X] = Sum[D, shop.Ss, X]
+    def program[R[_]](implicit in: In[shop.Ss, R]) = for {
+      a <- mappings.create[Sale, R](k => Sale(k, "ann", "tea", 1)); b <- mappings.create[Sale, R](k => Sale(k, "bo", "coffee", 2))
+      _ <- mappings.remove[Sale, R](a.id); c <- mappings.create[Sale, R](k => Sale(k, "cy", "milk", 3))
+      all <- mappings.all[Sale, R](List(Field("id").asc))
+    } yield (a.id, b.id, c.id, all.map(_.id))
+    val expected = ("000000000001", "000000000002", "000000000003", List("000000000002", "000000000003"))
+    val (state, inMemory) = fx0.run(mappings.datas.inMemory()(mappings.onData(Shop.sale)[DS, D, (String, String, String, List[String])](program[DS])))
+    assertEquals(inMemory, expected); assertEquals(state("_keys")("sales"), Json.obj("next" -> Json.num(3)))
+    var files = Map.empty[String, List[String]]
+    val onLines = fx0.run(mappings.datas.onLines(f => files.getOrElse(f, Nil), (f, l) => files = files.updated(f, files.getOrElse(f, Nil) :+ l))(
+      mappings.onData(Shop.sale)[DS, D, (String, String, String, List[String])](program[DS])))
+    assertEquals(onLines, expected); assertEquals(files("_keys.jsonl").size, 3)
+    // and two collections keep their own sequences
+    val (_, keys) = fx0.run(mappings.datas.inMemory()(mappings.datas.fresh[D]("a").flatMap(a1 => mappings.datas.fresh[D]("b").flatMap(b1 => mappings.datas.fresh[D]("a").map(a2 => (a1, b1, a2))))))
+    assertEquals(keys, ("000000000001", "000000000001", "000000000002"))
+  }
 }
 class MappingOnMachine extends MappingChecks(Machine, "machine")
 class MappingOnFree extends MappingChecks(Free, "free")

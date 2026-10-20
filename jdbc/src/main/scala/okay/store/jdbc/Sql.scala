@@ -11,8 +11,11 @@ import okay.store.{Data, Order, Where}
  * unchanged; a database is a dialect — the JSON extraction, the text search within, the array membership, the upsert.
  */
 final case class Dialect(name: String,
-                         /** the value at a path within a JSON column, as an expression */ extract: (String, List[String]) => String,
+                         /** the value at a path within a JSON column, as an expression a `?` compares to — `cast` after the `?` */ extract: (String, List[String]) => String,
+                         /** what a compared `?` is cast to: nothing for SQLite's scalars, `::jsonb` for Postgres's values */ cast: String,
+                         /** a compared value as the database takes it: a scalar for SQLite, the JSON text for Postgres */ value: Json => Any,
                          /** `Contains`: a condition with one `?`, the lowercased text, over the leaves at a path within a JSON column */ contains: (String, List[String]) => String,
+                         /** the text within a text expression: one `?`, the lowercased text */ textContains: String => String,
                          /** `Has`: a condition with one `?` over the array at a path within a JSON column */ has: (String, List[String]) => String,
                          /** `Eq(path, Null)`: the value at the path within a JSON column is JSON's null — present, not missing */ isNull: (String, List[String]) => String,
                          /** a table made where absent, its columns given as `"name" TYPE` */ create: (String, List[String]) => String,
@@ -22,9 +25,13 @@ final case class Dialect(name: String,
 object Dialect {
   /** a JSON path, `$.a.b`, the root `$` */
   def jsonPath(path: List[String]): String = if (path.isEmpty) "$" else "$." + path.mkString(".")
+  /** Postgres's text-array path, `{a,b}` */
+  def pgPath(path: List[String]): String = "{" + path.map(p => "\"" + p.replace("\"", "\\\"") + "\"").mkString(",") + "}"
+  /** Postgres's jsonpath, `$."a"."b"` */
+  def pgJsonPath(path: List[String]): String = "$" + path.map(p => "." + "\"" + p.replace("\"", "\\\"") + "\"").mkString
   /** an identifier, quoted; a quote within is refused */
   def quoted(name: String): String = { require(!name.contains('"'), s"an identifier has no quote: $name"); "\"" + name + "\"" }
-  /** a JSON value as the database compares it: a string, a whole number, a decimal, a boolean as 1/0, null */
+  /** a JSON value as SQLite compares it: a string, a whole number, a decimal, a boolean as 1/0, null */
   def bind(v: Json): Any = v match {
     case Json.Str(s) => s
     case Json.Num(n) => if (n.isWhole && n.isValidLong) java.lang.Long.valueOf(n.toLong) else java.lang.Double.valueOf(n.toDouble)
@@ -33,22 +40,28 @@ object Dialect {
     case other => Json.print(other)
   }
   /** SQLite with JSON1: `json_extract`, `json_tree` for the leaves within, `json_each` for an array's elements,
-   * `json_type` for JSON's null as distinct from missing */
+   * `json_type` for JSON's null as distinct from missing. Checked */
   val sqlite: Dialect = Dialect("sqlite",
     extract = (col, path) => s"json_extract($col, '${jsonPath(path)}')",
+    cast = "", value = bind,
     contains = (col, path) => s"EXISTS (SELECT 1 FROM json_tree($col, '${jsonPath(path)}') WHERE type NOT IN ('object', 'array') AND instr(lower(value), ?) > 0)",
+    textContains = x => s"instr(lower($x), ?) > 0",
     has = (col, path) => s"EXISTS (SELECT 1 FROM json_each($col, '${jsonPath(path)}') WHERE value = ?)",
     isNull = (col, path) => s"json_type($col, '${jsonPath(path)}') = 'null'",
     create = (t, cols) => s"CREATE TABLE IF NOT EXISTS ${quoted(t)} (${cols.mkString(", ")})",
     upsert = (t, cols) => s"INSERT OR REPLACE INTO ${quoted(t)} (${cols.map(quoted).mkString(", ")}) VALUES (${cols.map(_ => "?").mkString(", ")})",
     fresh = t => s"INSERT INTO ${quoted(t)} (collection, next) VALUES (?, 1) ON CONFLICT (collection) DO UPDATE SET next = next + 1 RETURNING next")
-  /** PostgreSQL, a sketch, UNCHECKED: `jsonb` paths; `Contains` over the subtree's text, so a key's name matches too,
-   * unlike the reference — a `jsonb_path` form would mend it */
+  /** PostgreSQL: `jsonb` — a value compared as a value (`#>` and `?::jsonb`, so a number is a number and a string a
+   * string, by jsonb's own order), the leaves within by `jsonb_path_query` with `.**`, an array's element by `@>`,
+   * JSON's null by `jsonb_typeof`. Checked against a Postgres in Docker (`OKAY_PG`). Known and said: jsonb orders
+   * strings before numbers where the reference orders numbers first — compare like with like */
   val postgres: Dialect = Dialect("postgres",
-    extract = (col, path) => s"($col::jsonb #>> '{${path.mkString(",")}}')",
-    contains = (col, path) => s"position(? in lower($col::jsonb #>> '{${path.mkString(",")}}')) > 0",
-    has = (col, path) => s"(($col::jsonb #> '{${path.mkString(",")}}') @> to_jsonb(?))",
-    isNull = (col, path) => s"($col::jsonb #> '{${path.mkString(",")}}') = 'null'::jsonb",
+    extract = (col, path) => s"($col::jsonb #> '${pgPath(path)}')",
+    cast = "::jsonb", value = v => Json.print(v),
+    contains = (col, path) => s"EXISTS (SELECT 1 FROM jsonb_path_query($col::jsonb, '${pgJsonPath(path)}.**') v WHERE jsonb_typeof(v) NOT IN ('object', 'array') AND position(? in lower(v #>> '{}')) > 0)",
+    textContains = x => s"position(? in lower($x)) > 0",
+    has = (col, path) => s"(jsonb_typeof($col::jsonb #> '${pgPath(path)}') = 'array' AND ($col::jsonb #> '${pgPath(path)}') @> ?::jsonb)",
+    isNull = (col, path) => s"jsonb_typeof($col::jsonb #> '${pgPath(path)}') = 'null'",
     create = (t, cols) => s"CREATE TABLE IF NOT EXISTS ${quoted(t)} (${cols.mkString(", ")})",
     upsert = (t, cols) => s"INSERT INTO ${quoted(t)} (${cols.map(quoted).mkString(", ")}) VALUES (${cols.map(_ => "?").mkString(", ")}) ON CONFLICT (${quoted(cols.head)}) DO UPDATE SET " +
       cols.tail.map(c => s"${quoted(c)} = EXCLUDED.${quoted(c)}").mkString(", "),
@@ -76,16 +89,17 @@ class Sqls[F <: Effects](implicit implementation: F) {
       if (!made(t)) { update(c, dialect.create(t, List(s"${Dialect.quoted("key")} ${dialect.textType} PRIMARY KEY", s"${Dialect.quoted("doc")} ${dialect.textType} NOT NULL"))); made += t }
       t
     }
-    import Dialect.bind
-    /** a `Where` as a condition and its parameters, in order */
+    import dialect.{value => bind}
+    /** a `Where` as a condition and its parameters, in order. A leaf's condition is `COALESCE(..., FALSE)`: a missing
+     * value makes SQL's NULL, which `NOT` would lose, where the reference says a predicate on nothing is false */
     def condition(w: Where): (String, List[Any]) = w match {
       case Where.All => ("1 = 1", Nil)
-      case Where.Eq(p, Json.Null) => (dialect.isNull("doc", p), Nil)
-      case Where.Eq(p, v) => (s"${dialect.extract("doc", p)} = ?", List(bind(v)))
-      case Where.Contains(p, t) => (dialect.contains("doc", p), List(t.toLowerCase))
-      case Where.Has(p, v) => (dialect.has("doc", p), List(bind(v)))
-      case Where.Less(p, v) => (s"${dialect.extract("doc", p)} < ?", List(bind(v)))
-      case Where.Greater(p, v) => (s"${dialect.extract("doc", p)} > ?", List(bind(v)))
+      case Where.Eq(p, Json.Null) => (Sqls.sure(dialect.isNull("doc", p)), Nil)
+      case Where.Eq(p, v) => (Sqls.sure(s"${dialect.extract("doc", p)} = ?${dialect.cast}"), List(bind(v)))
+      case Where.Contains(p, t) => (Sqls.sure(dialect.contains("doc", p)), List(t.toLowerCase))
+      case Where.Has(p, v) => (Sqls.sure(dialect.has("doc", p)), List(bind(v)))
+      case Where.Less(p, v) => (Sqls.sure(s"${dialect.extract("doc", p)} < ?${dialect.cast}"), List(bind(v)))
+      case Where.Greater(p, v) => (Sqls.sure(s"${dialect.extract("doc", p)} > ?${dialect.cast}"), List(bind(v)))
       case Where.And(Nil) => ("1 = 1", Nil)
       case Where.And(all) => val cs = all.map(condition); (cs.map(x => s"(${x._1})").mkString(" AND "), cs.flatMap(_._2))
       case Where.Or(Nil) => ("1 = 0", Nil)
@@ -117,4 +131,6 @@ class Sqls[F <: Effects](implicit implementation: F) {
 }
 object Sqls {
   def apply()(implicit fx: Effects): Sqls[fx.type] = { implicit val exact: fx.type = fx; new Sqls[fx.type] }
+  /** two-valued: a condition that is NULL is false */
+  def sure(condition: String): String = s"COALESCE(($condition), FALSE)"
 }

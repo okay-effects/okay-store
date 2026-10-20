@@ -55,7 +55,15 @@ Backends built: `Datas.inMemory` (a cell), `Datas.onLines(read, append)` (a coll
 `{"key", "doc"}` or `{"key", "gone": true}`, the last line of a key winning; `Directory.read/append` on the JVM),
 `Sqls.on(connection, dialect)` in `jdbc` (a table `(key, doc)` per collection made on first use; `Dialect.sqlite`
 checked — `json_extract`, `json_tree` for the leaves within, `json_each` for an array, `json_type` for JSON's null as
-distinct from missing — `Dialect.postgres` a sketch, unchecked). Not built, and how they would go: MongoDB (`Where`
+distinct from missing; `Dialect.postgres` CHECKED against a Postgres 17 in Docker (`PostgresSuite`, run when
+`OKAY_PG` names the database) — `jsonb` with `#>` and a `?::jsonb` compared as a value, `jsonb_path_query` with `.**`
+for the leaves within, `@>` for an array's element, `jsonb_typeof` for JSON's null; a dialect says `cast` and `value`
+for how a compared value travels, and `textContains` for a text column).
+
+DECIDED, found on Postgres: a leaf's condition is `COALESCE((...), FALSE)` in every compiler of `Where`. SQL's logic is
+three-valued — a predicate on a missing value is NULL, and `NOT` of it is NULL, so a row is lost — where the reference
+is two-valued: a predicate on nothing is false, and its negation true. The reference tests say `Not(Eq(missing, v))`,
+`Not(Has(missing, v))`, `Not(Less(...))`, `Not(Contains(...))` and hold on SQLite and on Postgres. Not built, and how they would go: MongoDB (`Where`
 is a subset of its query language, one collection a collection), Redis or RocksDB (a key `collection:key`, `Query` a
 scan with `Where.holds` — or an index the translation keeps), DynamoDB and Cassandra (a partition a collection, the
 same scan). A graph or a search engine is another vocabulary, not a backend of this one.
@@ -128,7 +136,8 @@ The reference's order was mended by it: `Less` and `Greater` hold only between v
 strings, booleans — and never for a missing value or a null, as SQL's `NULL` and a type mismatch compare to nothing;
 sorting stays total (missing and null first, then numbers, strings, booleans, the rest by JSON text). Not aligned
 and said: SQLite orders a boolean kept as an integer among numbers, and compares text to a number by type class
-where the reference says nothing holds; compare like with like.
+where the reference says nothing holds; Postgres's jsonb orders strings before numbers where the reference orders
+numbers first; compare like with like.
 
 ## The store on a database (`jdbc`, 2026-10-20)
 

@@ -76,7 +76,7 @@ class Tables[F <: Effects](implicit implementation: F) {
       case _ => col.sql
     }
     private def containsIn(col: Column, rest: List[String]): String =
-      if (col.leaf.isDefined) s"instr(lower(${text(col)}), ?) > 0" else dialect.contains(col.sql, rest)
+      if (col.leaf.isDefined) dialect.textContains(text(col)) else dialect.contains(col.sql, rest)
     /** a `Where` as a condition and its parameters: the head of a path a column, the rest within a JSON column */
     def condition(w: Where): (String, List[Any]) = w match {
       case Where.All => ("1 = 1", Nil)
@@ -85,21 +85,21 @@ class Tables[F <: Effects](implicit implementation: F) {
       case Where.Or(Nil) => ("1 = 0", Nil)
       case Where.Or(any) => val cs = any.map(condition); (cs.map(x => s"(${x._1})").mkString(" OR "), cs.flatMap(_._2))
       case Where.Not(x) => val (sql, ps) = condition(x); (s"NOT ($sql)", ps)
-      case Where.Contains(Nil, t) => (columns.map(col => s"(${containsIn(col, Nil)})").mkString(" OR "), columns.map(_ => t.toLowerCase))
+      case Where.Contains(Nil, t) => (columns.map(col => Sqls.sure(containsIn(col, Nil))).mkString(" OR "), columns.map(_ => t.toLowerCase))
       case Where.Eq(Nil, _) | Where.Has(Nil, _) | Where.Less(Nil, _) | Where.Greater(Nil, _) =>
         throw new IllegalArgumentException("a table per type compares columns: a path names a field")
       case Where.Eq(p, v) => byName.get(p.head) match {
         case None => ("1 = 0", Nil)
-        case Some(col) if col.leaf.isDefined => if (p.tail.nonEmpty) ("1 = 0", Nil) else if (v == Json.Null) (s"${col.sql} IS NULL", Nil) else (s"${col.sql} = ?", List(bind(v)))
-        case Some(col) => if (v == Json.Null) (dialect.isNull(col.sql, p.tail), Nil) else (s"${dialect.extract(col.sql, p.tail)} = ?", List(bind(v)))
+        case Some(col) if col.leaf.isDefined => if (p.tail.nonEmpty) ("1 = 0", Nil) else if (v == Json.Null) (s"${col.sql} IS NULL", Nil) else (Sqls.sure(s"${col.sql} = ?"), List(bind(v)))
+        case Some(col) => if (v == Json.Null) (Sqls.sure(dialect.isNull(col.sql, p.tail)), Nil) else (Sqls.sure(s"${dialect.extract(col.sql, p.tail)} = ?${dialect.cast}"), List(dialect.value(v)))
       }
       case Where.Contains(p, t) => byName.get(p.head) match {
         case None => ("1 = 0", Nil)
-        case Some(col) if col.leaf.isDefined => if (p.tail.nonEmpty) ("1 = 0", Nil) else (containsIn(col, Nil), List(t.toLowerCase))
-        case Some(col) => (dialect.contains(col.sql, p.tail), List(t.toLowerCase))
+        case Some(col) if col.leaf.isDefined => if (p.tail.nonEmpty) ("1 = 0", Nil) else (Sqls.sure(containsIn(col, Nil)), List(t.toLowerCase))
+        case Some(col) => (Sqls.sure(dialect.contains(col.sql, p.tail)), List(t.toLowerCase))
       }
       case Where.Has(p, v) => byName.get(p.head) match {
-        case Some(col) if col.leaf.isEmpty => (dialect.has(col.sql, p.tail), List(bind(v)))
+        case Some(col) if col.leaf.isEmpty => (Sqls.sure(dialect.has(col.sql, p.tail)), List(dialect.value(v)))
         case _ => ("1 = 0", Nil)
       }
       case Where.Less(p, v) => compared(p, "<", v)
@@ -107,8 +107,8 @@ class Tables[F <: Effects](implicit implementation: F) {
     }
     private def compared(p: List[String], op: String, v: Json): (String, List[Any]) = byName.get(p.head) match {
       case None => ("1 = 0", Nil)
-      case Some(col) if col.leaf.isDefined => if (p.tail.nonEmpty) ("1 = 0", Nil) else (s"${col.sql} $op ?", List(bind(v)))
-      case Some(col) => (s"${dialect.extract(col.sql, p.tail)} $op ?", List(bind(v)))
+      case Some(col) if col.leaf.isDefined => if (p.tail.nonEmpty) ("1 = 0", Nil) else (Sqls.sure(s"${col.sql} $op ?"), List(bind(v)))
+      case Some(col) => (Sqls.sure(s"${dialect.extract(col.sql, p.tail)} $op ?${dialect.cast}"), List(dialect.value(v)))
     }
     private def ordering(order: List[Order]): String = if (order.isEmpty) "" else " ORDER BY " + order.map { o =>
       val expr = byName.get(o.path.head) match {

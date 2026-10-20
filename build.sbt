@@ -47,6 +47,7 @@ lazy val core = crossBoth("core", "core").settings(name := "okay-store",
 /** ON A DATABASE: `Data` on JDBC by a dialect (SQLite checked, Postgres sketched), and the store directly on SQLite; the JVM */
 lazy val jdbc = (project in file("jdbc")).dependsOn(core.jvm % "compile->compile;test->test").settings(crossBuilt, name := "okay-store-jdbc",
   libraryDependencies ++= Seq("org.xerial" % "sqlite-jdbc" % "3.47.1.0",
+    "org.postgresql" % "postgresql" % "42.7.4" % Test,
     "io.github.okay-effects" %% "okay-effects-machine" % okayEffects % Test,
     "io.github.okay-effects" %% "okay-effects-free" % okayEffects % Test))
 

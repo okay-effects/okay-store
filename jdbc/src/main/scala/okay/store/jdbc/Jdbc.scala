@@ -46,7 +46,7 @@ object Jdbc {
   private def bound(c: Connection, sql: String, params: Seq[Any]): PreparedStatement = {
     val s = c.prepareStatement(sql)
     params.zipWithIndex.foreach {
-      case (None, i) => s.setNull(i + 1, java.sql.Types.VARCHAR)
+      case (None, i) => s.setObject(i + 1, null)
       case (Some(x), i) => s.setObject(i + 1, x)
       case (x, i) => s.setObject(i + 1, x)
     }

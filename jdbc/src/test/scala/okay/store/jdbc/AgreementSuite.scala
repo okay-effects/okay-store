@@ -69,7 +69,8 @@ abstract class AgreementChecks(val fx0: Runner, name: String) extends munit.FunS
     import Where._
     val wheres = List(Eq(List("a", "b"), Json.Str("Hello")), Eq(List("empty"), Json.Null), Eq(List("flag"), Json.Bool(true)), Contains(List("a"), "ELL"), Contains(List("ns"), "dee"),
       Contains(List("a"), "b"), Has(List("tags"), Json.Str("y")), Has(List("a"), Json.Str("y")), Less(List("a", "n"), Json.num(6)), Greater(List("a", "n"), Json.num(4)),
-      Not(Has(List("tags"), Json.Str("z"))), or(Eq(List("a", "n"), Json.num(9)), Eq(List("a", "n"), Json.num(7))), and(), Or(Nil))
+      Not(Has(List("tags"), Json.Str("z"))), or(Eq(List("a", "n"), Json.num(9)), Eq(List("a", "n"), Json.num(7))), and(), Or(Nil),
+      Not(Eq(List("flag"), Json.Bool(true))), Not(Eq(List("zz"), Json.Null)), Not(Less(List("a", "b"), Json.Str("m"))), Not(Contains(List("tags"), "z")))
     try {
       val got = fx0.run(sqls.on(c)(docs.foldLeft(datas.put[D]("t", "0", Json.obj()))((acc, kd) => acc.flatMap(_ => datas.put[D]("t", kd._1, kd._2))).flatMap(_ => datas.delete[D]("t", "0")).flatMap(_ =>
         wheres.foldLeft(pure[List[List[String]], D](Nil))((acc, w) => acc.flatMap(rs => datas.query[D]("t", w, List(Order.by("a", "n"))).map(found => rs :+ found.map(_._1)))))))

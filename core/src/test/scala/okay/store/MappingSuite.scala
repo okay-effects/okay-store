@@ -97,6 +97,32 @@ abstract class MappingChecks(val fx0: Runner, name: String) extends munit.FunSui
     assertEquals(remote, direct); assertEquals(direct._1.map(_.id), List("s2")); assertEquals(direct._2, 2L)
     assertEquals(carried.reverse, List("save", "save", "find", "count", "load", "remove", "load"))
   }
+  test("at(field): a path checked by the compiler and typed, the same Where as Field says untyped; through an Option; a list's element; a query runs") {
+    import okay.effects.shape.Day
+    final case class Addr(city: String, zip: Option[String])
+    final case class Who(name: String, born: Option[Day], address: Option[Addr], tags: List[String], score: Int)
+    val who: Mapping[Who] = Mapping("who", Shape.derived[Who], _.name)
+    assertEquals(Shop.sale.at("qty") > 2, Field("qty") > 2)
+    assertEquals(Shop.sale.at("customer") is "ann", Field("customer") is "ann")
+    assertEquals(Shop.sale.at("item") contains "tea", Field("item") contains "tea")
+    assertEquals(Shop.sale.at("qty").desc, Field("qty").desc)
+    assertEquals(who.at("address").at("city") is "Kyiv", Field("address") / "city" is "Kyiv")
+    assertEquals(who.at("address").at("zip") is Some("01001"), Field("address") / "zip" is "01001")
+    assertEquals(who.at("address").isNull, Field("address").isNull)
+    assertEquals(who.at("tags") has "y", Field("tags") has "y")
+    assertEquals(who.at("born") is Some(Day(1990, 5, 6)), Field("born") is "1990-05-06")
+    assertEquals(who.at("score") < 10, Field("score") < 10)
+    val purchases = mappings.datas.Collection("purchases", Purchase.shape, (p: Purchase) => p.id)
+    assertEquals(purchases.at("open") is true, Field("open") is true)
+    type DS[X] = Sum[D, shop.Ss, X]
+    val (_, found) = fx0.run(mappings.datas.inMemory()(mappings.onData(Shop.sale)[DS, D, List[Sale]](
+      mappings.save[Sale, DS](Sale("s1", "ann", "tea", 2)).flatMap(_ => mappings.save[Sale, DS](Sale("s2", "bo", "green tea", 5))).flatMap(_ =>
+        mappings.find[Sale, DS](Where.and(Shop.sale.at("qty") > 2, Shop.sale.at("item") contains "TEA"), List(Shop.sale.at("id").asc))))))
+    assertEquals(found.map(_.id), List("s2"))
+    assert(compileErrors("""Shop.sale.at("nope")""").contains("no field 'nope'"))
+    assert(compileErrors("""Shop.sale.at("qty") is "x"""").nonEmpty, "a value of another type than the field's does not compile")
+    assert(compileErrors("""who.at("tags") has 1""").nonEmpty, "an element of another type does not compile")
+  }
 }
 class MappingOnMachine extends MappingChecks(Machine, "machine")
 class MappingOnFree extends MappingChecks(Free, "free")

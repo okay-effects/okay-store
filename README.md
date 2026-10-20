@@ -9,7 +9,7 @@ asks and changes it (`kinds`, `find`, `get`, `history`, `define`, `add`, `revise
 from afar — a program performs `Store` in the browser and it happens on the server.
 
 TYPES MAPPED, the whole of an ORM on effects: `Mapping[A](collection, shape, key)` makes `Mapped[A, _]` the type's own
-effect — `save`, `load`, `remove`, `find(Field("qty") > 2)`, `count` — and `Mappings.onData(mapping)` is its handler on any
+effect — `save`, `load`, `remove`, `find(mapping.at("qty") > 2)` with the field checked by the compiler and typed, `count` — and `Mappings.onData(mapping)` is its handler on any
 backend of `Data`, one handler for every type; no proxies, no sessions, a value is a value. `okay-store-jdbc`'s `Tables.on(mapping, connection)`
 is the same effect as a table per type — the shape's fields the columns, nested values JSON columns — readable by the database's own tools.
 `Mapping.describe(mapping)` describes the type's effect for the faces: REST resources, MCP tools, performed from afar, with nothing more written.

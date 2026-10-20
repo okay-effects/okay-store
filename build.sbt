@@ -40,6 +40,8 @@ lazy val core = crossBoth("core", "core").settings(name := "okay-store",
     "io.github.okay-effects" %%% "okay-effects-describe" % okayEffects,
     "io.github.okay-effects" %%% "okay-effects-machine" % okayEffects % Test,
     "io.github.okay-effects" %%% "okay-effects-free" % okayEffects % Test))
+  // `at("field")` on 2.13 is a whitebox macro: scala-reflect to compile it, not to run it
+  .settings(libraryDependencies ++= (if (scalaVersion.value.startsWith("2")) Seq("org.scala-lang" % "scala-reflect" % scalaVersion.value % Provided) else Nil))
   .jvmSettings(Compile / unmanagedSourceDirectories += baseDirectory.value.getParentFile / "src" / "main" / "scala-jvm")
 
 /** ON A DATABASE: `Data` on JDBC by a dialect (SQLite checked, Postgres sketched), and the store directly on SQLite; the JVM */

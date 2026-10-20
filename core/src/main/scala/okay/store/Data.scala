@@ -137,8 +137,9 @@ class Datas[F <: Effects](implicit implementation: F) {
 
   /** A TYPED COLLECTION: documents of a shape, keyed by a function of the value — the words a domain's handler is
    * written in. What is in the store and does not read by the shape is the store's fault, not a problem for a form */
-  final case class Collection[A](name: String, shape: Shape[A], key: A => String) {
+  final case class Collection[A](name: String, shape: Shape[A], key: A => String) extends Typed[A] {
     Data.named(name)
+    def path: List[String] = Nil
     def decode(key: String, doc: Json): A = shape.decode(doc).fold(ps => throw new IllegalStateException(s"$name/$key does not read: ${Problem.render(ps)}"), a => a)
   }
   def keep[A, R[_]](c: Collection[A], a: A)(implicit in: In[Data, R]): Unit ! R = put[R](c.name, c.key(a), c.shape.encode(a))

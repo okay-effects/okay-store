@@ -15,8 +15,10 @@ import okay.effects.shape.Shape.{field, int, long, record, text, unit}
  * goes is the handlers' business, chosen at the edge. Several types are several effects in one row, each its own
  * handler, as `State[S]` is in okay-simple.
  */
-final case class Mapping[A](collection: String, shape: Shape[A], key: A => String) {
+final case class Mapping[A](collection: String, shape: Shape[A], key: A => String) extends Typed[A] {
   Data.named(collection)
+  /** a path starts here: `mapping.at("qty")` */
+  def path: List[String] = Nil
   def decode(key: String, doc: Json): A = shape.decode(doc).fold(ps => throw new IllegalStateException(s"$collection/$key does not read by its shape: ${Problem.render(ps)}"), a => a)
 }
 

@@ -221,12 +221,18 @@ final class Memory(initial: Map[String, Map[String, Json]] = Map.empty) extends 
 }
 
 /** ON LINES APPENDED: a collection is a file of lines, `{"key": k, "doc": d}` for a put and `{"key": k, "gone": true}`
- * for a delete, appended and never rewritten — the last line of a key wins, read by folding the file; crash-safe.
- * `read` and `append` are the platform's: a directory's files (`Directory`), a test's map. `compact` rewrites a file
- * as one line per key kept, by `write` — housekeeping at the edge, by the one who holds the files */
+ * for a delete, appended and never rewritten — the last line of a key wins; crash-safe. A file is folded ONCE, at
+ * first use, into a cache; a put or a delete appends the line and changes the cache, so a read is a map's. The
+ * files are this backend's own while it runs: another writer's lines are seen after `reload()`. `read` and `append`
+ * are the platform's: a directory's files (`Directory`), a test's map. `compact` rewrites a file as one line per
+ * key kept, by `write` — housekeeping at the edge, by the one who holds the files; the cache stays right */
 final class Lines(read: String => List[String], append: (String, String) => Unit) extends Backend {
   private def file(c: String) = Data.named(c) + ".jsonl"
-  private def docs(c: String): Map[String, Json] = read(file(c)).filter(_.trim.nonEmpty).foldLeft(Map.empty[String, Json]) { (m, line) =>
+  private val cached = scala.collection.mutable.Map.empty[String, Map[String, Json]]
+  private var countsCached: Option[Map[String, Long]] = None
+  /** the caches dropped: the files read again at next use */
+  def reload(): Unit = synchronized { cached.clear(); countsCached = None }
+  private def fold(c: String): Map[String, Json] = read(file(c)).filter(_.trim.nonEmpty).foldLeft(Map.empty[String, Json]) { (m, line) =>
     Descent.parse(line).toOption match {
       case Some(o: Json.Obj) => (o.get("key"), o.get("doc"), o.get("gone")) match {
         case (Some(Json.Str(k)), Some(d), _) => m.updated(k, d)
@@ -236,24 +242,31 @@ final class Lines(read: String => List[String], append: (String, String) => Unit
       case _ => m
     }
   }
+  private def docs(c: String): Map[String, Json] = cached.getOrElseUpdate(Data.named(c), fold(c))
   /** the sequences: a line per key given, `{"collection": c, "next": n}`, the last of a collection its count */
-  private def counts: Map[String, Long] = read("_keys.jsonl").foldLeft(Map.empty[String, Long]) { (m, line) =>
-    Descent.parse(line).toOption match {
-      case Some(o: Json.Obj) => (o.get("collection"), o.get("next")) match { case (Some(Json.Str(c)), Some(Json.Num(n))) => m.updated(c, n.toLong); case _ => m }
-      case _ => m
+  private def counts: Map[String, Long] = countsCached.getOrElse {
+    val cs = read("_keys.jsonl").foldLeft(Map.empty[String, Long]) { (m, line) =>
+      Descent.parse(line).toOption match {
+        case Some(o: Json.Obj) => (o.get("collection"), o.get("next")) match { case (Some(Json.Str(c)), Some(Json.Num(n))) => m.updated(c, n.toLong); case _ => m }
+        case _ => m
+      }
     }
+    countsCached = Some(cs); cs
   }
-  def answer[X](op: Data[X]): X = op match {
+  def answer[X](op: Data[X]): X = synchronized { op match {
     case Data.Fresh(c, answer) =>
       val next = counts.getOrElse(Data.named(c), 0L) + 1
-      append("_keys.jsonl", Json.print(Json.obj("collection" -> Json.Str(c), "next" -> Json.num(next)))); answer(Data.key(next))
+      append("_keys.jsonl", Json.print(Json.obj("collection" -> Json.Str(c), "next" -> Json.num(next))))
+      countsCached = Some(counts.updated(Data.named(c), next)); answer(Data.key(next))
     case Data.Get(c, k, answer) => answer(docs(c).get(k))
-    case Data.Put(c, k, d, answer) => append(file(c), Json.print(Json.obj("key" -> Json.Str(k), "doc" -> d))); answer(())
-    case Data.Delete(c, k, answer) => append(file(c), Json.print(Json.obj("key" -> Json.Str(k), "gone" -> Json.Bool(true)))); answer(())
+    case Data.Put(c, k, d, answer) =>
+      append(file(c), Json.print(Json.obj("key" -> Json.Str(k), "doc" -> d))); cached.update(Data.named(c), docs(c).updated(k, d)); answer(())
+    case Data.Delete(c, k, answer) =>
+      append(file(c), Json.print(Json.obj("key" -> Json.Str(k), "gone" -> Json.Bool(true)))); cached.update(Data.named(c), docs(c) - k); answer(())
     case Data.Query(c, w, o, l, answer) => answer(Order.select(docs(c).toList, w, o, l))
     case Data.Count(c, w, answer) => answer(docs(c).count { case (_, d) => Where.holds(w, d) }.toLong)
-  }
-  def compact(collections: List[String], write: (String, List[String]) => Unit): Unit = {
+  } }
+  def compact(collections: List[String], write: (String, List[String]) => Unit): Unit = synchronized {
     collections.foreach { c => write(file(c), docs(c).toList.map { case (k, d) => Json.print(Json.obj("key" -> Json.Str(k), "doc" -> d)) }) }
     val cs = counts
     if (cs.nonEmpty) write("_keys.jsonl", cs.toList.sortBy(_._1).map { case (c, n) => Json.print(Json.obj("collection" -> Json.Str(c), "next" -> Json.num(n))) })

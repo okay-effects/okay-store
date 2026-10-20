@@ -142,6 +142,24 @@ abstract class DataChecks(val fx0: Runner, name: String) extends munit.FunSuite 
     val nested = fx0.run(datas.atomically(m2)[D, Void, Long](datas.put[D]("t", "a", a).flatMap(_ => datas.count[D]("t"))))
     assertEquals(nested, 1L); assertEquals(m2.state("t").keySet, Set("a"))
   }
+  test(s"$name: Lines reads a file once: the cache answers after, a put or a delete changes it, reload sees another writer") {
+    var files = Map("t.jsonl" -> List(Json.print(Json.obj("key" -> Json.Str("a"), "doc" -> Json.obj("n" -> Json.num(1))))))
+    var reads = 0
+    val lines = new Lines(f => { reads += 1; files.getOrElse(f, Nil) }, (f, l) => files = files.updated(f, files.getOrElse(f, Nil) :+ l))
+    val program = for {
+      n1 <- datas.count[D]("t"); _ <- datas.put[D]("t", "b", Json.obj("n" -> Json.num(2))); n2 <- datas.count[D]("t")
+      _ <- datas.delete[D]("t", "a"); keys <- datas.query[D]("t").map(_.map(_._1)); k1 <- datas.fresh[D]("t"); k2 <- datas.fresh[D]("t")
+    } yield (n1, n2, keys, k1, k2)
+    assertEquals(fx0.run(datas.on(lines)(program)), (1L, 2L, List("b"), "000000000001", "000000000002"))
+    assertEquals(reads, 2, "t.jsonl once, _keys.jsonl once")
+    // another writer's line is not seen until reload
+    files = files.updated("t.jsonl", files("t.jsonl") :+ Json.print(Json.obj("key" -> Json.Str("c"), "doc" -> Json.obj("n" -> Json.num(3)))))
+    assertEquals(fx0.run(datas.on(lines)(datas.count[D]("t"))), 1L)
+    lines.reload()
+    assertEquals(fx0.run(datas.on(lines)(datas.count[D]("t"))), 2L); assertEquals(reads, 3)
+    lines.compact(List("t"), (f, ls) => files = files.updated(f, ls))
+    assertEquals(files("t.jsonl").size, 2); assertEquals(fx0.run(datas.on(lines)(datas.count[D]("t"))), 2L); assertEquals(reads, 4, "the counts for _keys, read once more after the reload")
+  }
 }
 class DataOnMachine extends DataChecks(Machine, "machine")
 class DataOnFree extends DataChecks(Free, "free")

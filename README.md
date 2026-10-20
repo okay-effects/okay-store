@@ -15,7 +15,7 @@ is the same effect as a table per type — the shape's fields the columns, neste
 `Mapping.describe(mapping)` describes the type's effect for the faces: REST resources, MCP tools, performed from afar, with nothing more written.
 
 THE LEVEL BELOW: `Data` is collections of JSON documents by key with a query every store can answer (`Where`, `Order`), and
-its backends — values `Memory`, `Lines` (appended, compacted), `Sql` by a dialect in `okay-store-jdbc` (SQLite and Postgres checked), a document or
+its backends — values `Memory`, `Lines` (appended, cached, compacted), `Sql` by a dialect in `okay-store-jdbc` (SQLite and Postgres checked), a document or
 key-value store the same way — and `atomically(backend)`, a transaction over any of them: nothing written when it ends early. A domain effect — `Store`, or an application's own — is handled by a translation into `Data`
 written once over typed collections (`Datas.Collection`, `keep`, `fetch`, `select`), and runs on every backend; the
 agreement tests say the backends answer alike.

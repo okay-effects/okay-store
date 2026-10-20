@@ -88,7 +88,12 @@ store keeps it the same way, under a reserved name.
 
 Agreement, checked on the machine and on Free: `StorePrograms` is one program of the store; `keeping`, `onData` on
 memory, on lines, on SQLite, and `Jdbcs.on` answer it alike. `Programs` is one program of `Purchases`; memory, lines
-and SQLite answer it alike. A cache over `Lines` (the file folded at every read): not done.
+and SQLite answer it alike.
+
+`Lines` folds a file ONCE, at first use, into a cache a put or a delete keeps right (the line appended, the map
+changed), the sequences likewise; so a read is a map's and the file is the journal. The files are the backend's own
+while it runs — a `Lines` is one writer, as a journal has one — and another writer's lines are seen after `reload()`.
+Checked by counting the reads.
 
 ## Mapping — a type mapped, the whole of an ORM (2026-10-20)
 

@@ -16,31 +16,26 @@ abstract class AgreementChecks(val fx0: Runner, name: String) extends munit.FunS
   import stores._
   type S[X] = Sum[Void, Store, X]
 
-  val passport: Kind = Kind(KindId("passport"), "Passport", Schema.Record(Vector(
-    Schema.Field("number", Schema.Text(Nil), Some("Number"), None, true, None), Schema.Field("country", Schema.Text(Nil), Some("Country"), None, false, None))),
-    Set("number"), List("country", "number"), Json.obj("contextual" -> Json.Bool(true)))
-  val note: Kind = Kind(KindId("note"), "Note", Schema.Record(Vector(Schema.Field("text", Schema.Text(Nil), Some("Text"), None, false, None))))
-  def ids(): () => String = { var n = 0; () => { n += 1; s"id$n" } }
-  def clock(): () => Long = { var t = 1000L; () => { t += 1; t } }
-
-  type Out = (List[Kind], List[Record], List[Record], List[Record], Option[Record], List[Record], List[Record], (List[Event], Int), Int)
-  /** define, add two, revise, find by text, by tag, by both, history, retire, get the retired, the journal, save, the count after */
-  val program: Out ! S = for {
-    _ <- define[S](passport); _ <- define[S](note); _ <- define[S](passport.copy(name = "Passport (travel)"))
-    r <- add[S](passport.id, Json.obj("number" -> Json.Str("AB123"), "country" -> Json.Str("UA")), Json.obj("x" -> Json.num(1)), Set("travel", "old"), None)
-    _ <- add[S](note.id, Json.obj("text" -> Json.Str("Ab12 is a number to keep")), Json.Obj.empty, Set("misc"), Some("a note"))
-    _ <- revise[S](r.id, Json.obj("number" -> Json.Str("AB124"), "country" -> Json.Str("UA")), r.meta, Set("travel"), Some("renewed"))
-    _ <- audit[S](r.id, "number", "owner")
-    ks <- kinds[S]; byText <- find[S]("ab12"); byTag <- find[S]("", Some("travel")); byBoth <- find[S]("ab12", Some("misc"))
-    h <- history[S](r.id); _ <- retire[S](r.id, Some("lost")); gone <- get[S](r.id); all <- find[S]("")
-    j <- journaled[S]; _ <- saved[S]; j2 <- journaled[S]
-  } yield (ks, byText, byTag, byBoth, gone, h, all, j, j2._2)
+  import StorePrograms.{passport, ids, clock}
+  val datas: Datas[fx0.type] = new Datas[fx0.type]()(fx0)
+  val sqls: Sqls[fx0.type] = new Sqls[fx0.type]()(fx0)
+  type D[X] = Sum[Void, Data, X]
+  type DS[X] = Sum[D, Store, X]
+  type DP[X] = Sum[D, Purchases, X]
+  val programs = new StorePrograms.Of[fx0.type](fx0)
+  val program: StorePrograms.Out ! S = programs.program[S]
+  type Out = StorePrograms.Out
 
   test(s"$name: the same answers in memory and on SQLite") {
     val (_, inMemory) = fx0.run(keeping(Kept.empty(List(passport)), ids(), clock())(program))
     val c = Sqlite.open(":memory:", List(passport))
     val onSqlite = try fx0.run(jdbcs.on(c, ids(), clock())(program)) finally c.close()
     assertEquals(onSqlite, inMemory)
+    // and translated to Data, on SQL: the same again
+    val c2 = Sqlite.connect(":memory:")
+    val onData = try fx0.run(sqls.on(c2)(stores.onData(ids(), clock())[DS, D, Out](
+      datas.put[DS]("kinds", passport.id.value, Kind.shape.encode(passport)).flatMap(_ => programs.program[DS])))) finally c2.close()
+    assertEquals(onData, inMemory)
     // and the answers mean what they should
     assertEquals(inMemory._1.map(_.name), List("Note", "Passport (travel)"))
     assertEquals(inMemory._2.map(_.kind.value), List("passport", "note"))          // newest first, the passport revised last; "ab12" in a number and in a note's text
@@ -58,6 +53,31 @@ abstract class AgreementChecks(val fx0: Runner, name: String) extends munit.FunS
     val (got, kinds2, unsaved2, unsaved3) = try fx0.run(jdbcs.on(c2, ids(), clock())(get[S](r.id).flatMap(g => kinds[S].flatMap(ks => journaled[S].flatMap(j => saved[S].flatMap(_ => journaled[S].map(j2 => (g, ks, j._2, j2._2)))))))) finally c2.close()
     assertEquals(got, Some(r)); assertEquals(kinds2.map(_.id), List(passport.id)); assertEquals((unsaved1, unsaved2, unsaved3), (1, 1, 0))
     f.delete()
+  }
+  test(s"$name: a domain of one's own on Data, on SQL: the same answers as in memory") {
+    val c = Sqlite.connect(":memory:")
+    val on = new Purchases.OnData[fx0.type](datas, Programs.ids())
+    val out = try fx0.run(sqls.on(c)(on[DP, D, Programs.Out](new Programs.Of[fx0.type](fx0).purchasing[DP]))) finally c.close()
+    assertEquals(out, Programs.expected)
+  }
+  test(s"$name: Where compiled to SQL: equality, null, text within, an element, less, not, or — against the reference on the same documents") {
+    val c = Sqlite.connect(":memory:")
+    val docs = List(
+      "1" -> Json.obj("a" -> Json.obj("b" -> Json.Str("Hello"), "n" -> Json.num(3)), "tags" -> Json.arr(Json.Str("x"), Json.Str("y")), "ns" -> Json.arr(Json.num(1), Json.obj("c" -> Json.Str("deep")))),
+      "2" -> Json.obj("a" -> Json.obj("b" -> Json.Str("world"), "n" -> Json.num(7)), "tags" -> Json.arr(Json.Str("z")), "flag" -> Json.Bool(true)),
+      "3" -> Json.obj("a" -> Json.obj("n" -> Json.num(5)), "empty" -> Json.Null))
+    import Where._
+    val wheres = List(Eq(List("a", "b"), Json.Str("Hello")), Eq(List("empty"), Json.Null), Eq(List("flag"), Json.Bool(true)), Contains(List("a"), "ELL"), Contains(List("ns"), "dee"),
+      Contains(List("a"), "b"), Has(List("tags"), Json.Str("y")), Has(List("a"), Json.Str("y")), Less(List("a", "n"), Json.num(6)), Greater(List("a", "n"), Json.num(4)),
+      Not(Has(List("tags"), Json.Str("z"))), or(Eq(List("a", "n"), Json.num(9)), Eq(List("a", "n"), Json.num(7))), and(), Or(Nil))
+    try {
+      val got = fx0.run(sqls.on(c)(docs.foldLeft(datas.put[D]("t", "0", Json.obj()))((acc, kd) => acc.flatMap(_ => datas.put[D]("t", kd._1, kd._2))).flatMap(_ => datas.delete[D]("t", "0")).flatMap(_ =>
+        wheres.foldLeft(pure[List[List[String]], D](Nil))((acc, w) => acc.flatMap(rs => datas.query[D]("t", w, List(Order.by("a", "n"))).map(found => rs :+ found.map(_._1)))))))
+      val reference = wheres.map(w => Order.select(docs, w, List(Order.by("a", "n")), None).map(_._1))
+      assertEquals(got, reference)
+      assertEquals(fx0.run(sqls.on(c)(datas.query[D]("t", All, List(Order.desc("a", "n")), Some(2)).map(_.map(_._1)))), List("2", "3"))
+      assertEquals(fx0.run(sqls.on(c)(datas.count[D]("t", Has(List("tags"), Json.Str("x"))))), 1L)
+    } finally c.close()
   }
 }
 class AgreementOnMachine extends AgreementChecks(Machine, "machine")

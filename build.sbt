@@ -40,9 +40,10 @@ lazy val core = crossBoth("core", "core").settings(name := "okay-store",
     "io.github.okay-effects" %%% "okay-effects-describe" % okayEffects,
     "io.github.okay-effects" %%% "okay-effects-machine" % okayEffects % Test,
     "io.github.okay-effects" %%% "okay-effects-free" % okayEffects % Test))
+  .jvmSettings(Compile / unmanagedSourceDirectories += baseDirectory.value.getParentFile / "src" / "main" / "scala-jvm")
 
-/** THE STORE ON A DATABASE: the same effect handled by JDBC — SQLite first; the JVM */
-lazy val jdbc = (project in file("jdbc")).dependsOn(core.jvm).settings(crossBuilt, name := "okay-store-jdbc",
+/** ON A DATABASE: `Data` on JDBC by a dialect (SQLite checked, Postgres sketched), and the store directly on SQLite; the JVM */
+lazy val jdbc = (project in file("jdbc")).dependsOn(core.jvm % "compile->compile;test->test").settings(crossBuilt, name := "okay-store-jdbc",
   libraryDependencies ++= Seq("org.xerial" % "sqlite-jdbc" % "3.47.1.0",
     "io.github.okay-effects" %% "okay-effects-machine" % okayEffects % Test,
     "io.github.okay-effects" %% "okay-effects-free" % okayEffects % Test))

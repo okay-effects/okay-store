@@ -15,10 +15,11 @@ import okay.store.{Event, Kind, Record, RecordId, Store, VersionId}
  */
 object Sqlite {
   /** a database at `path` (`":memory:"` for one that lives with the connection), its tables made, these kinds present */
-  def open(path: String, kinds: List[Kind] = Nil): Connection = {
+  def open(path: String, kinds: List[Kind] = Nil): Connection = { val c = connect(path); Jdbc.prepare(c, kinds); c }
+  /** a connection and nothing else: for `Data` on SQL (`Sqls.on`), whose tables are the collections' */
+  def connect(path: String): Connection = {
     Class.forName("org.sqlite.JDBC")   // the driver by name: a service loader under another class loader (sbt's) may miss it
-    val c = DriverManager.getConnection(s"jdbc:sqlite:$path")
-    Jdbc.prepare(c, kinds); c
+    DriverManager.getConnection(s"jdbc:sqlite:$path")
   }
 }
 
@@ -54,8 +55,8 @@ object Jdbc {
   def record(json: String): Record = Descent.parse(json).left.map(_.message).flatMap(j => Record.shape.decode(j).left.map(okay.effects.shape.Problem.render)).fold(e => throw new IllegalStateException(s"a record in the database does not read: $e"), r => r)
   def kind(json: String): Kind = Descent.parse(json).left.map(_.message).flatMap(j => Kind.shape.decode(j).left.map(okay.effects.shape.Problem.render)).fold(e => throw new IllegalStateException(s"a kind in the database does not read: $e"), k => k)
   def event(json: String): Event = Descent.parse(json).left.map(_.message).flatMap(j => Event.shape.decode(j).left.map(okay.effects.shape.Problem.render)).fold(e => throw new IllegalStateException(s"an event in the database does not read: $e"), x => x)
-  /** what `find` searches: the fields' text, the tags, the note, lowercased, as the handler in memory does */
-  def searchText(r: Record): String = (Json.print(r.fields) + " " + r.tags.toList.sorted.mkString(" ") + " " + r.note.getOrElse("")).toLowerCase
+  /** what `find` searches: `Stores.searchText`, the fields' values, the tags, the note, as every handler means it */
+  def searchText(r: Record): String = okay.store.Stores.searchText(r)
   def tagsText(r: Record): String = r.tags.toList.sorted.mkString(" ", " ", " ")
 }
 

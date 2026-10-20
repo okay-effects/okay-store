@@ -48,7 +48,7 @@ class Stores[F <: Effects](implicit implementation: F) {
   def saved[R[_]](implicit in: In[Store, R]): Unit ! R = perform[Store].apply[R, Unit](Store.Saved(x => x))
 
   /** THE HANDLER IN MEMORY: what is kept in a cell, in place; ids and the clock given, so a test is deterministic.
-   * `find` is by text in the fields, the tags and the note, and by a tag */
+   * `find` is `Stores.matches`: by text in the fields' values, the tags and the note, and by a tag */
   def keeping(initial: Kept, ids: () => String, now: () => Long): Keeping = new Keeping(initial, ids, now)
   final class Keeping(initial: Kept, ids: () => String, now: () => Long) {
     def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Store, R, Rest]): (Kept, A) ! Rest =
@@ -58,9 +58,7 @@ class Stores[F <: Effects](implicit implementation: F) {
           val v = cell.get
           op match {
             case Store.Kinds(answer) => answer(v.kinds.values.toList.sortBy(_.name))
-            case Store.Find(text, tag, answer) =>
-              val t = text.trim.toLowerCase
-              answer(v.records.filter(r => tag.forall(r.tags.contains) && (t.isEmpty || Json.print(r.fields).toLowerCase.contains(t) || r.tags.exists(_.toLowerCase.contains(t)) || r.note.exists(_.toLowerCase.contains(t)))))
+            case Store.Find(text, tag, answer) => answer(v.records.filter(r => Stores.matches(text, tag, r)))
             case Store.Get(id, answer) => answer(v.current(id))
             case Store.History(id, answer) => answer(v.history(id))
             case Store.Define(kind, answer) => cell.set(v(if (v.kinds.contains(kind.id)) Event.KindRevised(kind, now()) else Event.KindDefined(kind, now()))); answer(())
@@ -81,10 +79,84 @@ class Stores[F <: Effects](implicit implementation: F) {
         }
       })
   }
+
+  /** THE STORE ON `Data`: the same effect translated to the level below — collections `kinds`, `versions`, `retired`,
+   * `events`, `marks` — so it runs on every backend of `Data`: memory, lines, SQL, a document store. A version carries
+   * its `seq`, the order of writing, as does an event; the current version of an id is its greatest `seq` unless the
+   * id is retired. Slower than the direct handlers where a query must be folded here (the current version of every
+   * id), and checked against them */
+  def onData(ids: () => String, now: () => Long): OnData = new OnData(ids, now)
+  final class OnData(ids: () => String, now: () => Long) {
+    val datas: Datas[fx.type] = new Datas[fx.type]()(fx)
+    private def seqOf(d: Json): Long = Where.at(d, List("seq")).collect { case Json.Num(n) => n.toLong }.getOrElse(0L)
+    private def withSeq(j: Json, seq: Long): Json = j match { case o: Json.Obj => ("seq" -> Json.num(seq)) +: o.without("seq"); case other => other }
+    private def recordOf(d: Json): Record = Record.shape.decode(d).fold(ps => throw new IllegalStateException(s"a version does not read: ${okay.effects.shape.Problem.render(ps)}"), r => r)
+    private def kindOf(d: Json): Kind = Kind.shape.decode(d).fold(ps => throw new IllegalStateException(s"a kind does not read: ${okay.effects.shape.Problem.render(ps)}"), k => k)
+    private def eventOf(d: Json): Event = Event.shape.decode(d).fold(ps => throw new IllegalStateException(s"an event does not read: ${okay.effects.shape.Problem.render(ps)}"), e => e)
+    private def key(seq: Long): String = f"$seq%012d"
+
+    def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Store, R, Rest], d: In[Data, Rest]): A ! Rest = {
+      def note(e: Event): Unit ! Rest = datas.count[Rest]("events").flatMap(n => datas.put[Rest]("events", key(n + 1), withSeq(Event.shape.encode(e), n + 1)))
+      def insert(r: Record): Unit ! Rest = datas.count[Rest]("versions").flatMap(n => datas.put[Rest]("versions", r.version.value, withSeq(Record.shape.encode(r), n + 1)))
+      def retired: Set[RecordId] ! Rest = datas.query[Rest]("retired").map(_.map { case (k, _) => RecordId(k) }.toSet)
+      def current(id: RecordId): Option[Record] ! Rest = retired.flatMap(gone =>
+        if (gone(id)) pure[Option[Record], Rest](None)
+        else datas.query[Rest]("versions", Where.Eq(List("id"), Json.Str(id.value)), List(Order.desc("seq")), Some(1)).map(_.headOption.map { case (_, d) => recordOf(d) }))
+      handle[Store, R, Rest, A, A](p, new Handler[Store, Rest, A, A] {
+        def ret(a: A) = pure(a)
+        def op[X](op: Store[X], k: X => A ! Rest) = op match {
+          case Store.Kinds(answer) => datas.query[Rest]("kinds").flatMap(ks => k(answer(ks.map { case (_, d) => kindOf(d) }.sortBy(_.name))))
+          case Store.Find(text, tag, answer) =>
+            // the versions that match, newest first; a hit counts when it is its id's current version
+            datas.query[Rest]("versions", Stores.finding(text, tag), List(Order.desc("seq"))).flatMap { hits =>
+              val newest = hits.map { case (_, d) => recordOf(d) }.foldLeft(List.empty[Record])((acc, r) => if (acc.exists(_.id == r.id)) acc else acc :+ r)
+              newest.foldLeft(pure[List[Record], Rest](Nil))((acc, r) => acc.flatMap(rs => current(r.id).map(c => if (c.exists(_.version == r.version)) rs :+ r else rs)))
+            }.flatMap(rs => k(answer(rs.sortBy(r => -r.at))))
+          case Store.Get(id, answer) => current(id).flatMap(r => k(answer(r)))
+          case Store.History(id, answer) => datas.query[Rest]("versions", Where.Eq(List("id"), Json.Str(id.value)), List(Order.desc("seq"))).flatMap(vs => k(answer(vs.map { case (_, d) => recordOf(d) })))
+          case Store.Define(kind, answer) => datas.get[Rest]("kinds", kind.id.value).flatMap(known =>
+            datas.put[Rest]("kinds", kind.id.value, Kind.shape.encode(kind)).flatMap(_ => note(if (known.isDefined) Event.KindRevised(kind, now()) else Event.KindDefined(kind, now()))).flatMap(_ => k(answer(()))))
+          case Store.Add(kind, fields, meta, tags, n, answer) =>
+            val r = Record(RecordId(ids()), VersionId(ids()), None, kind, fields, meta, tags, n, now())
+            insert(r).flatMap(_ => note(Event.RecordAdded(r))).flatMap(_ => k(answer(r)))
+          case Store.Revise(id, fields, meta, tags, n, answer) => current(id).flatMap {
+            case Some(old) =>
+              val r = old.copy(version = VersionId(ids()), parent = Some(old.version), fields = fields, meta = meta, tags = tags, note = n, at = now())
+              insert(r).flatMap(_ => note(Event.RecordRevised(r))).flatMap(_ => k(answer(Some(r))))
+            case None => k(answer(None))
+          }
+          case Store.Retire(id, reason, answer) =>
+            val at = now()
+            datas.put[Rest]("retired", id.value, Json.Obj(Vector("at" -> Json.num(at)) ++ reason.map(x => "reason" -> Json.Str(x)))).flatMap(_ => note(Event.RecordRetired(id, reason, at))).flatMap(_ => k(answer(())))
+          case Store.Audit(id, field, by, answer) => note(Event.Accessed(id, field, by, now())).flatMap(_ => k(answer(())))
+          case Store.Journaled(answer) => datas.query[Rest]("events", Where.All, List(Order.by("seq"))).flatMap(es => datas.get[Rest]("marks", "saved").flatMap { mark =>
+            val marked = mark.map(seqOf).getOrElse(0L)
+            k(answer((es.map { case (_, d) => eventOf(d) }, es.count { case (_, d) => seqOf(d) > marked })))
+          })
+          case Store.Saved(answer) => datas.count[Rest]("events").flatMap(n => datas.put[Rest]("marks", "saved", Json.obj("seq" -> Json.num(n)))).flatMap(_ => k(answer(())))
+        }
+      })
+    }
+  }
+
 }
 
 object Stores {
   def apply()(implicit fx: Effects): Stores[fx.type] = { implicit val exact: fx.type = fx; new Stores[fx.type] }
+
+  /** WHAT `find` MEANS, on every handler: the text within the fields' values (not their names), the tags or the note,
+   * ignoring case; the tag present. `searchText` is the same as one text, for a handler that keeps a column of it */
+  def matches(text: String, tag: Option[String], r: Record): Boolean = {
+    val t = text.trim.toLowerCase
+    tag.forall(r.tags.contains) && (t.isEmpty || Where.leaves(r.fields).exists(_.toLowerCase.contains(t)) || r.tags.exists(_.toLowerCase.contains(t)) || r.note.exists(_.toLowerCase.contains(t)))
+  }
+  def searchText(r: Record): String = (Where.leaves(r.fields) ++ r.tags.toList.sorted ++ r.note.toList).mkString("\n").toLowerCase
+  /** `find`'s condition over a version document, for a handler on `Data` */
+  def finding(text: String, tag: Option[String]): Where = {
+    val t = text.trim.toLowerCase
+    Where.And(tag.map(g => Where.Has(List("tags"), Json.Str(g))).toList ++
+      (if (t.isEmpty) Nil else List(Where.Or(List(Where.Contains(List("fields"), t), Where.Contains(List("tags"), t), Where.Contains(List("note"), t))))))
+  }
 
   /** THE STORE DESCRIBED: every operation with its parameters' and result's shapes, for the faces — served as REST
    * resources or tools, performed from afar */

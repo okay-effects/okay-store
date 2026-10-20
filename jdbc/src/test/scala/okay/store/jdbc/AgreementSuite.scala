@@ -169,6 +169,23 @@ abstract class AgreementChecks(val fx0: Runner, name: String) extends munit.FunS
       assertEquals(early, Left("no")); assertEquals(fx0.run(datas.on(sql)(datas.count[D]("t"))), 1L)
     } finally c.close()
   }
+  test(s"$name: the database's own transaction: seen within, committed at the end, rolled back when ended early") {
+    import fx0.std._
+    type Er[X] = Sum[Void, ({ type L[x] = Error[String, x] })#L, X]
+    type E[X] = Sum[Er, Data, X]
+    val c = Sqlite.connect(":memory:")
+    try {
+      val a = Json.obj("n" -> Json.num(1))
+      def inside[R[_]](implicit in: In[Data, R]) = datas.put[R]("t", "a", a).flatMap(_ => datas.count[R]("t")).flatMap(n => datas.query[R]("t", Where.All, Nil, Some(1)).map(rs => (n, rs.map(_._1))))
+      assertEquals(fx0.run(sqls.atomically(c)[D, Void, (Long, List[String])](inside[D])), (1L, List("a")))
+      assert(c.getAutoCommit, "committed, the connection back to autocommit")
+      assertEquals(fx0.run(sqls.on(c)(datas.count[D]("t"))), 1L)
+      // ended early: the transaction is left open, uncommitted — the next one rolls it back
+      val early = fx0.run(attempt[String](sqls.atomically(c)[E, Er, Unit](datas.put[E]("t", "b", a).flatMap(_ => raise[String, E, Unit]("no")))))
+      assertEquals(early, Left("no")); assert(!c.getAutoCommit, "left open")
+      assertEquals(fx0.run(sqls.atomically(c)[D, Void, Long](datas.count[D]("t"))), 1L, "rolled back by the next")
+    } finally c.close()
+  }
 }
 class AgreementOnMachine extends AgreementChecks(Machine, "machine")
 class AgreementOnFree extends AgreementChecks(Free, "free")

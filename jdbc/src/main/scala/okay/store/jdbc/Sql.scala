@@ -82,6 +82,32 @@ class Sqls[F <: Effects](implicit implementation: F) {
   def backend(c: Connection, dialect: Dialect = Dialect.sqlite): Sql = new Sql(c, dialect)
   /** the handler over it */
   def on(c: Connection, dialect: Dialect = Dialect.sqlite): datas.On = datas.on(backend(c, dialect))
+
+  /** ATOMICALLY, THE DATABASE'S OWN: `p`'s operations go straight to the database inside its transaction — it sees its
+   * own unfinished writes, a query keeps its `LIMIT` — and `p`'s end is `COMMIT`, one atomic write; what ends `p`
+   * before leaves the transaction open, and the next `atomically` on the connection, or its closing, rolls it back
+   * (`Transactional.rollback` does at once). The same meaning as `Datas.atomically` over the journal, faster, and the
+   * database's isolation. A key from `Fresh` is the transaction's too: rolled back, it is given again — never to a
+   * committed use twice */
+  def atomically(c: Connection, dialect: Dialect = Dialect.sqlite): Atomically = new Atomically(new Transactional(backend(c, dialect), c))
+  final class Atomically(transactional: Transactional) {
+    import fx._
+    def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Data, R, Rest]): A ! Rest =
+      handle[Data, R, Rest, A, A](p, new TailHandler[Data, Rest, A, A] {
+        def ret(a: A) = { transactional.commit(); pure(a) }
+        def answer[X](op: Data[X]): X = { transactional.begin(); transactional.answer(op) }
+      })
+  }
+}
+
+/** a connection's transaction around a `Sql` backend: begun at the first operation, committed at the end; a
+ * transaction left open by a program that ended early is rolled back by the next `begin` */
+final class Transactional(sql: Sql, c: Connection) extends Backend {
+  @volatile private var open = false
+  def begin(): Unit = synchronized { if (!open) { if (!c.getAutoCommit) c.rollback() else c.setAutoCommit(false); open = true } }   // a transaction another left open is rolled back first
+  def answer[X](op: Data[X]): X = sql.answer(op)
+  def commit(): Unit = synchronized { if (open) { c.commit(); c.setAutoCommit(true); open = false } }
+  def rollback(): Unit = synchronized { if (open) { c.rollback(); c.setAutoCommit(true); open = false } }
 }
 object Sqls {
   def apply()(implicit fx: Effects): Sqls[fx.type] = { implicit val exact: fx.type = fx; new Sqls[fx.type] }

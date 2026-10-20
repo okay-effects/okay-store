@@ -59,8 +59,17 @@ dialect)` in `jdbc`; `Datas.inMemory`/`onLines` and `Sqls.on` are the words over
 backend over a backend (`Datas.atomically(backend)(p)`): `p`'s writes in a log, its reads through it, a query the
 backend's rows with the log laid over in the reference's order, all written when `p` ends — so an error attempted
 outside, or an abort, ending `p` early writes nothing; `Fresh` goes through at once, a key spent is never given
-twice; nested, a transaction is over a transaction. The same on every backend, as okay-simple's `transaction` is
-over its `Store`; a database's own transaction is a later speed, not a meaning. Checked on memory, lines and SQLite.
+twice. A program is one transaction: `Data` is one effect in a row, so a transaction within one has no place to be
+said — split the program. The same on every backend, as okay-simple's `transaction` is over its `Store`. Checked on
+memory, lines and SQLite.
+
+THE DATABASE'S OWN (2026-10-21): `Sqls.atomically(connection, dialect)(p)` in `jdbc` — the operations go straight to
+the database inside its transaction (it sees its own unfinished writes, a query keeps its `LIMIT`), `p`'s end is
+`COMMIT`, one atomic write under the database's isolation. What ends `p` early cannot run a finalizer — an abort
+drops the rest, nothing is thrown — so the transaction is left open, and the next `atomically` on the connection,
+or closing it, rolls it back; `Transactional.rollback()` does at once. A key from `Fresh` is the transaction's: rolled
+back, it is given again, never to a committed use twice — the one difference from the journal, said. Checked on
+SQLite and Postgres: the same answers as the journal, the rollback by the next.
 
 Backends built, then: `Memory`, `Lines`,
 `Sqls.on(connection, dialect)` in `jdbc` (a table `(key, doc)` per collection made on first use; `Dialect.sqlite`

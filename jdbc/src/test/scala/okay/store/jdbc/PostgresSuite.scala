@@ -98,4 +98,17 @@ class PostgresSuite extends munit.FunSuite {
       assertEquals(out, (Some(ann), Some(bo), List(bo), List(ann), List(ann), List(ann), List(ann), List(ann), List(ann), 1L, Nil, "000000000001"))
     } finally { fresh(c); c.close() }
   }
+  test("the database's own transaction on Postgres: committed at the end, rolled back when ended early") {
+    import Machine.std.{Error, attempt, raise}
+    type Er[X] = Sum[Void, ({ type L[x] = Error[String, x] })#L, X]
+    type E[X] = Sum[Er, Data, X]
+    val c = connect(); fresh(c)
+    try {
+      val a = Json.obj("n" -> Json.num(1))
+      assertEquals(Machine.run(sqls.atomically(c, Dialect.postgres)[D, Void, Long](datas.put[D]("t", "a", a).flatMap(_ => datas.count[D]("t")))), 1L)
+      val early = Machine.run(attempt[String](sqls.atomically(c, Dialect.postgres)[E, Er, Unit](datas.put[E]("t", "b", a).flatMap(_ => raise[String, E, Unit]("no")))))
+      assertEquals(early, Left("no"))
+      assertEquals(Machine.run(sqls.atomically(c, Dialect.postgres)[D, Void, Long](datas.count[D]("t"))), 1L)
+    } finally { fresh(c); c.close() }
+  }
 }

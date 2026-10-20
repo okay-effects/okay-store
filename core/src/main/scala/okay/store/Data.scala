@@ -188,7 +188,8 @@ class Datas[F <: Effects](implicit implementation: F) {
    * what ends `p` before (an error attempted outside, an abort) drops the log and nothing is written. The same on
    * every backend, as okay-simple's `transaction` is over its `Store`; a backend's own transaction is a later speed,
    * not a meaning. `Fresh` goes to the backend at once: a key given to a transaction that ends early is spent, never
-   * given twice. Nested, a transaction is over a transaction */
+   * given twice. A program is one transaction: `Data` is one effect in a row, so a transaction within a transaction
+   * has no place to be said — split the program instead */
   def atomically(backend: Backend): Atomically = new Atomically(backend)
   final class Atomically(backend: Backend) {
     def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Data, R, Rest]): A ! Rest =

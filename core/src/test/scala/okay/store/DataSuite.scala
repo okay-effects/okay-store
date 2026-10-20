@@ -137,10 +137,10 @@ abstract class DataChecks(val fx0: Runner, name: String) extends munit.FunSuite 
     lines.compact(List("t"), (f, ls) => files = files.updated(f, ls))
     assertEquals(files("t.jsonl").size, 3); assertEquals(files("_keys.jsonl").size, 1)
     assertEquals(fx0.run(datas.on(lines)(datas.query[D]("t", Where.All, List(Order.by("n"))).map(_.map(_._1)))), List("a", "b", "c"))
-    // nested: a transaction over a transaction, the inner's writes seen by the outer, written once at the end
+    // a count within sees the log, the backend is written once at the end
     val m2 = new Memory()
-    val nested = fx0.run(datas.atomically(m2)[D, Void, Long](datas.put[D]("t", "a", a).flatMap(_ => datas.count[D]("t"))))
-    assertEquals(nested, 1L); assertEquals(m2.state("t").keySet, Set("a"))
+    val counted = fx0.run(datas.atomically(m2)[D, Void, Long](datas.put[D]("t", "a", a).flatMap(_ => datas.count[D]("t"))))
+    assertEquals(counted, 1L); assertEquals(m2.state("t").keySet, Set("a"))
   }
   test(s"$name: Lines reads a file once: the cache answers after, a put or a delete changes it, reload sees another writer") {
     var files = Map("t.jsonl" -> List(Json.print(Json.obj("key" -> Json.Str("a"), "doc" -> Json.obj("n" -> Json.num(1))))))

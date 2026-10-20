@@ -66,6 +66,37 @@ abstract class MappingChecks(val fx0: Runner, name: String) extends munit.FunSui
     val e = intercept[IllegalStateException](fx0.run(mappings.datas.inMemory(bad)(mappings.onData(Shop.customer)[DC, D, Option[Customer]](mappings.load[Customer, DC]("x")))))
     assert(e.getMessage.contains("customers/x does not read"), e.getMessage)
   }
+  test(s"$name: Where and Order as values: a round trip through their shapes, a JSON Schema of find's parameters") {
+    val w = Where.and(Field("a") / "b" is "x", Where.or(Field("n") > 2, Where.Not(Field("tags") has "z")), Field("gone").isNull, Where.All)
+    assertEquals(Where.shape.decode(Where.shape.encode(w)), Right(w))
+    assertEquals(Order.shape.decode(Order.shape.encode(Field("n").desc)), Right(Field("n").desc))
+    val d = Mapping.describe(Shop.sale)
+    assertEquals(d.operations.map(_.name), List("save", "load", "remove", "find", "count"))
+    val schema = okay.effects.shape.JsonSchema.of(d.operation("find").get.params.erased)
+    assert(Json.print(schema).contains("\"where\"") && Json.print(schema).contains("$ref"), Json.print(schema))
+  }
+  test(s"$name: a mapped type described: the same program answers the same when performed from afar, the service in its own run") {
+    val domains = new okay.effects.describe.Domains[fx0.type]()(fx0)
+    val d = Mapping.describe(Shop.sale)
+    type Ss[X] = Mapped[Sale, X]
+    type S[X] = Sum[Void, Ss, X]
+    type DS[X] = Sum[D, Ss, X]
+    def program[R[_]](implicit in: In[Ss, R]) = for {
+      _ <- mappings.save[Sale, R](Sale("s1", "ann", "tea", 2)); _ <- mappings.save[Sale, R](Sale("s2", "bo", "green tea", 5))
+      teas <- mappings.find[Sale, R](Field("item") contains "tea", List(Field("qty").desc), Some(1)); n <- mappings.count[Sale, R](Field("qty") > 1)
+      one <- mappings.load[Sale, R]("s1"); _ <- mappings.remove[Sale, R]("s1"); gone <- mappings.load[Sale, R]("s1")
+    } yield (teas, n, one, gone)
+    val (_, direct) = fx0.run(mappings.datas.inMemory()(mappings.onData(Shop.sale)[DS, D, (List[Sale], Long, Option[Sale], Option[Sale])](program[DS])))
+    var state = Map.empty[String, Map[String, Json]]; var carried = List.empty[String]
+    val transport: (okay.effects.describe.Op[Ss, _, _], Json) => Json ! Void = (o, args) => {
+      carried = o.name :: carried
+      val (st, r) = fx0.run(mappings.datas.inMemory(state)(mappings.onData(Shop.sale)[DS, D, Either[okay.effects.shape.Problems, Json]](domains.serve[Ss, DS](d)(o.name, args))))
+      state = st; pure[Json, Void](r.fold(ps => throw new IllegalStateException(ps.toString), j => j))
+    }
+    val remote = fx0.run(domains.remote[Ss](d).apply[S, Void, (List[Sale], Long, Option[Sale], Option[Sale])](transport)(program[S]))
+    assertEquals(remote, direct); assertEquals(direct._1.map(_.id), List("s2")); assertEquals(direct._2, 2L)
+    assertEquals(carried.reverse, List("save", "save", "find", "count", "load", "remove", "load"))
+  }
 }
 class MappingOnMachine extends MappingChecks(Machine, "machine")
 class MappingOnFree extends MappingChecks(Free, "free")

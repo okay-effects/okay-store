@@ -12,6 +12,7 @@ TYPES MAPPED, the whole of an ORM on effects: `Mapping[A](collection, shape, key
 effect — `save`, `load`, `remove`, `find(Field("qty") > 2)`, `count` — and `Mappings.onData(mapping)` is its handler on any
 backend of `Data`, one handler for every type; no proxies, no sessions, a value is a value. `okay-store-jdbc`'s `Tables.on(mapping, connection)`
 is the same effect as a table per type — the shape's fields the columns, nested values JSON columns — readable by the database's own tools.
+`Mapping.describe(mapping)` describes the type's effect for the faces: REST resources, MCP tools, performed from afar, with nothing more written.
 
 THE LEVEL BELOW: `Data` is collections of JSON documents by key with a query every store can answer (`Where`, `Order`), and
 its backends — memory, lines appended to files, SQL by a dialect in `okay-store-jdbc` (SQLite checked), a document or

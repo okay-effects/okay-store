@@ -3,6 +3,7 @@ package okay.store
 import okay.effects.Effects
 import okay.effects.json.{Descent, Json}
 import okay.effects.shape.{Problem, Shape}
+import okay.effects.shape.Shape.{any, bool, deferred, field, record, sub, sum, text, unit}
 
 /**
  * THE LEVEL BELOW A DOMAIN: data as every store keeps it — COLLECTIONS of JSON documents by key, a query over them.
@@ -45,6 +46,19 @@ object Where {
   final case class Not(w: Where) extends Where
   def and(ws: Where*): Where = And(ws.toList)
   def or(ws: Where*): Where = Or(ws.toList)
+
+  /** a condition as a value, for a wire: `{"type": "eq", "path": [...], "value": ...}`, the connectives recursive */
+  val path: Shape[List[String]] = text.many()
+  lazy val shape: Shape[Where] = sum(
+    sub[Where, All.type]("all", unit.map[All.type](_ => All)(_ => ())) { case All => Some(All); case _ => None },
+    sub[Where, Eq]("eq", record(field("path", path), field("value", any))(Eq(_, _))(w => (w.path, w.value))) { case w: Eq => Some(w); case _ => None },
+    sub[Where, Contains]("contains", record(field("path", path), field("text", text))(Contains(_, _))(w => (w.path, w.text))) { case w: Contains => Some(w); case _ => None },
+    sub[Where, Has]("has", record(field("path", path), field("value", any))(Has(_, _))(w => (w.path, w.value))) { case w: Has => Some(w); case _ => None },
+    sub[Where, Less]("less", record(field("path", path), field("than", any))(Less(_, _))(w => (w.path, w.than))) { case w: Less => Some(w); case _ => None },
+    sub[Where, Greater]("greater", record(field("path", path), field("than", any))(Greater(_, _))(w => (w.path, w.than))) { case w: Greater => Some(w); case _ => None },
+    sub[Where, And]("and", record(field("all", deferred("where")(shape).many()))(And(_))(_.all)) { case w: And => Some(w); case _ => None },
+    sub[Where, Or]("or", record(field("any", deferred("where")(shape).many()))(Or(_))(_.any)) { case w: Or => Some(w); case _ => None },
+    sub[Where, Not]("not", record(field("where", deferred("where")(shape)))(Not(_))(_.w)) { case w: Not => Some(w); case _ => None })
 
   /** the value at a path: object members by name, array items by index */
   def at(doc: Json, path: List[String]): Option[Json] = path match {
@@ -96,6 +110,7 @@ object Where {
 /** an ordering by a path; ascending unless said */
 final case class Order(path: List[String], descending: Boolean = false)
 object Order {
+  val shape: Shape[Order] = record(field("path", Where.path), field("descending", bool).withDefault(false))(Order(_, _))(o => (o.path, o.descending))
   def by(path: String*): Order = Order(path.toList)
   def desc(path: String*): Order = Order(path.toList, descending = true)
   /** documents in this order, a stable sort, the rest of the order breaking ties */

@@ -1,8 +1,10 @@
 package okay.store
 
 import okay.effects.Effects
+import okay.effects.describe.{Call, Describe, Op}
 import okay.effects.json.Json
 import okay.effects.shape.{Problem, Shape}
+import okay.effects.shape.Shape.{field, int, long, record, text, unit}
 
 /**
  * A TYPE MAPPED TO A STORE — the whole of an ORM, on effects and not on proxies. A `Mapping[A]` says what a value of
@@ -16,6 +18,30 @@ import okay.effects.shape.{Problem, Shape}
 final case class Mapping[A](collection: String, shape: Shape[A], key: A => String) {
   Data.named(collection)
   def decode(key: String, doc: Json): A = shape.decode(doc).fold(ps => throw new IllegalStateException(s"$collection/$key does not read by its shape: ${Problem.render(ps)}"), a => a)
+}
+
+object Mapping {
+  /** THE TYPE'S EFFECT DESCRIBED, from its mapping alone: so a mapped type is served — REST resources, MCP tools — and
+   * performed from afar with no more said. `find` and `count` take a `Where` and an `Order` as values */
+  def describe[A](m: Mapping[A]): Describe[({ type L[X] = Mapped[A, X] })#L] = new Describe[({ type L[X] = Mapped[A, X] })#L](m.collection) {
+    type E[X] = Mapped[A, X]
+    private val byKey = record(field("key", text))(k => k)(k => k)
+    val save: Op[E, A, Unit] = Op("save", m.shape, unit, (a: A) => Mapped.Save[A, Unit](a, x => x), Some(s"a ${m.collection} value kept, by its key"), writes = true)
+    val load: Op[E, String, Option[A]] = Op("load", byKey, m.shape.optional, (k: String) => Mapped.Load[A, Option[A]](k, x => x), Some("the value of a key"))
+    val remove: Op[E, String, Unit] = Op("remove", byKey, unit, (k: String) => Mapped.Remove[A, Unit](k, x => x), Some("the value of a key removed"), writes = true)
+    val find: Op[E, (Where, List[Order], Option[Int]), List[A]] = Op("find",
+      record(field("where", Where.shape).withDefault(Where.All), field("order", Order.shape.many()).withDefault(Nil), field("limit", int.optional))((w, o, l) => (w, o, l))(x => x),
+      m.shape.many(), (a: (Where, List[Order], Option[Int])) => Mapped.Find[A, List[A]](a._1, a._2, a._3, x => x), Some("the values that match, in order, at most limit"))
+    val count: Op[E, Where, Long] = Op("count", record(field("where", Where.shape).withDefault(Where.All))(w => w)(w => w), long, (w: Where) => Mapped.Count[A, Long](w, x => x), Some("how many match"))
+    val operations = List(save, load, remove, find, count)
+    def split[X](op: E[X]): Call[X] = op match {
+      case Mapped.Save(a, k) => call(save, a, k)
+      case Mapped.Load(key, k) => call(load, key, k)
+      case Mapped.Remove(key, k) => call(remove, key, k)
+      case Mapped.Find(w, o, l, k) => call(find, (w, o, l), k)
+      case Mapped.Count(w, k) => call(count, w, k)
+    }
+  }
 }
 
 sealed trait Mapped[A, X]

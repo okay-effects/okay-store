@@ -10,5 +10,7 @@ Read before anything else; then `specs/okay-store.md`.
 - Nothing here knows an application: what a record is beyond its kind's fields is `meta`, the application's own JSON;
   what a kind is beyond its schema is `meta` too. verity (github.com/okay-effects/verity) is the first application;
   its context and validity live in `meta`.
+- `jdbc/`: the same effect on a database (SQLite), the JVM; a handler never changes what an operation means — the
+  agreement test (`AgreementSuite`) runs one program in memory and on SQLite and compares every answer.
 - Tests on both compilers, on the machine and on `Free`.
 - Commits: plain messages, what and why, no attribution trailers.

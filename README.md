@@ -8,7 +8,11 @@ asks and changes it (`kinds`, `find`, `get`, `history`, `define`, `add`, `revise
 [okay-faces](https://github.com/okay-effects/okay-faces) serves it as REST resources or MCP tools, and performs it
 from afar — a program performs `Store` in the browser and it happens on the server.
 
-Scala 3.3 LTS and 2.13, one source; the JVM, Scala.js and Scala Native. On [okay-simple](https://github.com/okay-effects/okay-simple)
+`okay-store-jdbc` is the same effect on a database: `Sqlite.open(path, kinds)` and `Jdbcs.on(connection, ids, clock)`, a
+row per version with the record's JSON beside the columns a query needs, the events table the journal; the agreement
+test runs one program on both handlers and gets the same answers.
+
+Scala 3.3 LTS and 2.13, one source; the JVM, Scala.js and Scala Native (`jdbc` the JVM). On [okay-simple](https://github.com/okay-effects/okay-simple)
 alone. The first application is [verity](https://github.com/okay-effects/verity).
 
 ```scala

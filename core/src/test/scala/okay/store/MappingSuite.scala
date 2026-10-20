@@ -13,7 +13,7 @@ final case class Customer(id: String, name: String, city: String)
 final case class Sale(id: String, customer: String, item: String, qty: Int)
 object Shop {
   val customer: Mapping[Customer] = Mapping("customers", record(field("id", text), field("name", text), field("city", text))(Customer(_, _, _))(c => (c.id, c.name, c.city)), _.id)
-  val sale: Mapping[Sale] = Mapping("sales", record(field("id", text), field("customer", text), field("item", text), field("qty", int))(Sale(_, _, _, _))(s => (s.id, s.customer, s.item, s.qty)), _.id)
+  val sale: Mapping[Sale] = Mapping.keyed("sales", record(field("id", text), field("customer", text), field("item", text), field("qty", int))(Sale(_, _, _, _))(s => (s.id, s.customer, s.item, s.qty)))(_.id)
 
   type Out = (List[Sale], List[Sale], Long, Option[Customer], Option[Customer], List[Customer], List[Sale])
   val expected: Out = (
@@ -71,7 +71,7 @@ abstract class MappingChecks(val fx0: Runner, name: String) extends munit.FunSui
     assertEquals(Where.shape.decode(Where.shape.encode(w)), Right(w))
     assertEquals(Order.shape.decode(Order.shape.encode(Field("n").desc)), Right(Field("n").desc))
     val d = Mapping.describe(Shop.sale)
-    assertEquals(d.operations.map(_.name), List("save", "load", "remove", "find", "count"))
+    assertEquals(d.operations.map(_.name), List("save", "load", "remove", "find", "count", "create"))
     val schema = okay.effects.shape.JsonSchema.of(d.operation("find").get.params.erased)
     assert(Json.print(schema).contains("\"where\"") && Json.print(schema).contains("$ref"), Json.print(schema))
   }
@@ -152,6 +152,35 @@ abstract class MappingChecks(val fx0: Runner, name: String) extends munit.FunSui
     // and two collections keep their own sequences
     val (_, keys) = fx0.run(mappings.datas.inMemory()(mappings.datas.fresh[D]("a").flatMap(a1 => mappings.datas.fresh[D]("b").flatMap(b1 => mappings.datas.fresh[D]("a").map(a2 => (a1, b1, a2))))))
     assertEquals(keys, ("000000000001", "000000000001", "000000000002"))
+  }
+  test("the key a field: create crosses a wire — the value without its key goes, the value with the store's key comes back") {
+    assertEquals(Shop.sale.keyField, Some("id")); assertEquals(Shop.sale.key(Sale("s9", "x", "y", 1)), "s9")
+    assertEquals(Shop.sale.rekey(Sale("", "ann", "tea", 2), "k1"), Sale("k1", "ann", "tea", 2))
+    val d = Mapping.describe(Shop.sale)
+    assert(d.operations.map(_.name).contains("create"))
+    assertEquals(Mapping.describe(Shop.customer).operations.map(_.name).contains("create"), false, "a key that is a function does not cross")
+    assert(d.operation("create").get.params.decode(Json.obj("customer" -> Json.Str("ann"), "item" -> Json.Str("tea"), "qty" -> Json.num(2))).isRight, "the key may be left out")
+    val domains = new okay.effects.describe.Domains[fx0.type]()(fx0)
+    type Ss[X] = Mapped[Sale, X]
+    type S[X] = Sum[Void, Ss, X]
+    type DS[X] = Sum[D, Ss, X]
+    def program[R[_]](implicit in: In[Ss, R]) = for {
+      a <- mappings.create[Sale, R](k => Sale(k, "ann", "tea", 2)); b <- mappings.create[Sale, R](k => Sale(k, "bo", "coffee", 1)); all <- mappings.all[Sale, R](List(Field("id").asc))
+    } yield (a, b, all)
+    val (_, direct) = fx0.run(mappings.datas.inMemory()(mappings.onData(Shop.sale)[DS, D, (Sale, Sale, List[Sale])](program[DS])))
+    assertEquals(direct._1.id, "000000000001"); assertEquals(direct._3.map(_.id), List("000000000001", "000000000002"))
+    var state = Map.empty[String, Map[String, Json]]; var carried = List.empty[(String, Json)]
+    val transport: (okay.effects.describe.Op[Ss, _, _], Json) => Json ! Void = (o, args) => {
+      carried = (o.name, args) :: carried
+      val (st, r) = fx0.run(mappings.datas.inMemory(state)(mappings.onData(Shop.sale)[DS, D, Either[okay.effects.shape.Problems, Json]](domains.serve[Ss, DS](d)(o.name, args))))
+      state = st; pure[Json, Void](r.fold(ps => throw new IllegalStateException(ps.toString), j => j))
+    }
+    val remote = fx0.run(domains.remote[Ss](d).apply[S, Void, (Sale, Sale, List[Sale])](transport)(program[S]))
+    assertEquals(remote, direct)
+    assertEquals(carried.reverse.head, ("create", Json.obj("id" -> Json.Str(""), "customer" -> Json.Str("ann"), "item" -> Json.Str("tea"), "qty" -> Json.num(2))))
+    intercept[IllegalArgumentException](Mapping.keyed("x", Shop.customer.shape, "nope"))
+    assert(compileErrors("""Mapping.keyed("x", Shop.sale.shape)(_.qty)""").nonEmpty, "the key field is text")
+    assert(compileErrors("""Mapping.keyed("x", Shop.sale.shape)(_.toString)""").contains("a field is selected"))
   }
 }
 class MappingOnMachine extends MappingChecks(Machine, "machine")

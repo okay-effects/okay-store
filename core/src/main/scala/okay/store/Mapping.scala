@@ -3,7 +3,7 @@ package okay.store
 import okay.effects.Effects
 import okay.effects.describe.{Call, Describe, Op}
 import okay.effects.json.Json
-import okay.effects.shape.{Problem, Shape}
+import okay.effects.shape.{Problem, Schema, Shape}
 import okay.effects.shape.Shape.{field, int, long, record, text, unit}
 
 /**
@@ -15,15 +15,34 @@ import okay.effects.shape.Shape.{field, int, long, record, text, unit}
  * goes is the handlers' business, chosen at the edge. Several types are several effects in one row, each its own
  * handler, as `State[S]` is in okay-simple.
  */
-final case class Mapping[A](collection: String, shape: Shape[A], key: A => String) extends Typed[A] {
+final case class Mapping[A](collection: String, shape: Shape[A], key: A => String, keyField: Option[String] = None) extends Typed[A] {
   Data.named(collection)
   /** a path starts here: `mapping.at("qty")` */
   def path: List[String] = Nil
   type In = A
   def decode(key: String, doc: Json): A = shape.decode(doc).fold(ps => throw new IllegalStateException(s"$collection/$key does not read by its shape: ${Problem.render(ps)}"), a => a)
+  /** the value with this key in its key field — what `create` over a wire needs; only when the key is a field */
+  def rekey(a: A, key: String): A = keyField match {
+    case Some(f) => shape.encode(a) match {
+      case o: Json.Obj => decode(key, o.without(f).+:(f -> Json.Str(key)))
+      case other => throw new IllegalStateException(s"$collection: a value encodes to ${Json.kind(other)}, not a record")
+    }
+    case None => throw new IllegalArgumentException(s"$collection: the key is a function of the value, not a field — create crosses a wire only with a key field")
+  }
 }
 
-object Mapping {
+object Mapping extends MappingWords {
+  /** THE KEY A FIELD: `Mapping.keyed("sales", shape, "id")` — the key read from the field, and put there by the store's
+   * `create` (`rekey`), so `create` crosses a wire: the value without its key goes, the value with the store's key
+   * comes back. `Mapping.keyed("sales", shape)(_.id)` names the field with the compiler's check */
+  def keyed[A](collection: String, shape: Shape[A], field: String): Mapping[A] = {
+    val fields = shape.erased match { case Schema.Record(fs) => fs.map(_.name); case Schema.Described(Schema.Record(fs), _, _) => fs.map(_.name); case _ => Vector.empty }
+    require(fields.contains(field), s"$collection: no field '$field' to be the key among ${fields.mkString(", ")}")
+    Mapping[A](collection, shape, a => shape.encode(a) match {
+      case o: Json.Obj => o.get(field) match { case Some(Json.Str(k)) => k; case other => throw new IllegalStateException(s"$collection: the key field '$field' is ${other.map(Json.kind).getOrElse("missing")}, not text") }
+      case other => throw new IllegalStateException(s"$collection: a value encodes to ${Json.kind(other)}, not a record")
+    }, Some(field))
+  }
   /** THE TYPE'S EFFECT DESCRIBED, from its mapping alone: so a mapped type is served — REST resources, MCP tools — and
    * performed from afar with no more said. `find` and `count` take a `Where` and an `Order` as values */
   def describe[A](m: Mapping[A]): Describe[({ type L[X] = Mapped[A, X] })#L] = new Describe[({ type L[X] = Mapped[A, X] })#L](m.collection) {
@@ -36,13 +55,21 @@ object Mapping {
       record(field("where", Where.shape).withDefault(Where.All), field("order", Order.shape.many()).withDefault(Nil), field("limit", int.optional))((w, o, l) => (w, o, l))(x => x),
       m.shape.many(), (a: (Where, List[Order], Option[Int])) => Mapped.Find[A, List[A]](a._1, a._2, a._3, x => x), Some("the values that match, in order, at most limit"))
     val count: Op[E, Where, Long] = Op("count", record(field("where", Where.shape).withDefault(Where.All))(w => w)(w => w), long, (w: Where) => Mapped.Count[A, Long](w, x => x), Some("how many match"))
-    val operations = List(save, load, remove, find, count)
+    /** `create`, when the key is a field: the value without its key (the field defaulted to "") in, the value with the
+     * store's key out; over a wire, `create(make)` sends `make("")` */
+    val create: Option[Op[E, A, A]] = m.keyField.map(f =>
+      Op("create", m.shape.defaulted(f, Json.Str("")), m.shape, (a: A) => Mapped.Create[A, A](key => m.rekey(a, key), x => x), Some(s"a ${m.collection} value kept under a key from the store, its '$f' the store's"), writes = true))
+    val operations = List(save, load, remove, find, count) ++ create.toList
     def split[X](op: E[X]): Call[X] = op match {
       case Mapped.Save(a, k) => call(save, a, k)
       case Mapped.Load(key, k) => call(load, key, k)
       case Mapped.Remove(key, k) => call(remove, key, k)
       case Mapped.Find(w, o, l, k) => call(find, (w, o, l), k)
       case Mapped.Count(w, k) => call(count, w, k)
+      case Mapped.Create(make, k) => create match {
+        case Some(c) => call(c, make(""), k)
+        case None => throw new IllegalArgumentException(s"${m.collection}: create crosses a wire only when the key is a field (Mapping.keyed)")
+      }
     }
   }
 }

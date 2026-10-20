@@ -128,7 +128,15 @@ value's own `key` is expected to be it. Each backend keeps the sequences where i
 collection `_keys` (a name no collection may take), lines in `_keys.jsonl` (a line per key given, the last of a
 collection its count), SQL in a table `_keys (collection, next)` by one statement, `INSERT ... ON CONFLICT DO UPDATE
 ... RETURNING` — the database's, not the connection's, so two connections never agree on a key. A table per type
-uses the same table. Not described for the faces: `create` takes a function.
+uses the same table.
+
+THE KEY A FIELD (2026-10-21): `Mapping.keyed(collection, shape)(_.id)` — the field named by a lambda the compiler
+checks (a string name too, `keyed(collection, shape, "id")`, checked when the mapping is made) — says the key is a
+field: `key` reads it, `rekey(a, key)` puts it, through the shape's JSON. So `create` CROSSES A WIRE: `Mapping.describe`
+has `create` whose parameters are the shape with the key field defaulted to "", the value without its key goes, the
+value with the store's key comes back; over a wire `create(make)` sends `make("")`. A mapping whose key is a function
+of the value has no `create` over a wire — `save` is its word — and `split` says so by name. DECIDED against a draft
+type per entity (an ORM's DTO): the shape already knows the fields, a second type says nothing new.
 
 `Mapping.describe(mapping)` is the type's effect DESCRIBED from the mapping alone — `save(A)`, `load(key)`,
 `remove(key)`, `find(where, order, limit)`, `count(where)` with the shapes of `A`, `Where` (recursive, through

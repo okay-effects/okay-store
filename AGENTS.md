@@ -12,7 +12,9 @@ Read before anything else; then `specs/okay-store.md`.
   its context and validity live in `meta`.
 - `Mapping[A]` + `Mapped[A, _]` + `Mappings.onData` (core) is the ORM: a type's repository as an effect, its handler
   generic over types and backends; `jdbc`'s `Tables` the same effect as a table per type, straight on SQL. Keep it that
-  thin: no sessions, no proxies, no laziness.
+  thin: no sessions, no proxies, no laziness. A field is named ONCE, in the type: `typed.at("field")` is checked by the
+  compiler (`TypedWords`, each compiler its own, on okay-simple's `ShapeDerivation`/`ShapeMacros`); `Field(...)` is for
+  paths the compiler cannot know.
 - `Data` (core) is the level below every domain: collections of JSON documents, a `Where`/`Order` query with reference
   semantics (`Where.holds`, `Order.select`); backends in memory, on lines, on SQL (`jdbc`, by a `Dialect`). A domain's
   handler is a translation into `Data` over typed collections; the direct handlers are the particular mappings. A

@@ -80,8 +80,8 @@ its key — and that is all an ORM is here:
   type, as okay-simple's `State[S]`; a program over several types has several in its row.
 - `Mappings.onData(mapping)` is the handler, ONE for every type: a save a put of the encoded value by its key, a find
   a query decoded by the shape. The backend is whatever handles `Data` next — memory, lines, SQLite, a document store.
-- `mapping.at("qty") > 2`, `mapping.at("item") contains "tea"`, `mapping.at("address").at("city") is "Kyiv"`,
-  `mapping.at("tags") has "y"`, `mapping.at("qty").desc`: a `Where` and an `Order` with THE FIELD CHECKED BY THE
+- `mapping.at(_.qty) > 2`, `mapping.at("item") contains "tea"`, `mapping.at(_.address).at(_.city) is "Kyiv"`, `pair.at(_.a.city)`,
+  `mapping.at(_.tags) has "y"`, `mapping.at("qty").desc` — a field by a lambda or by its name: a `Where` and an `Order` with THE FIELD CHECKED BY THE
   COMPILER against the mapped type (Scala 3 by `Mirror`, 2.13 by a macro) and the path typed as the field — a name
   mistyped, a value of another type, an element of another type do not compile; through an `Option` as through the
   value. `at` is said of anything `Typed[A]`: a `Mapping`, a `Collection`, a `Path`. `Field("qty") > 2` says the same

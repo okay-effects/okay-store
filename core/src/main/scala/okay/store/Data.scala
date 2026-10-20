@@ -140,6 +140,7 @@ class Datas[F <: Effects](implicit implementation: F) {
   final case class Collection[A](name: String, shape: Shape[A], key: A => String) extends Typed[A] {
     Data.named(name)
     def path: List[String] = Nil
+    type In = A
     def decode(key: String, doc: Json): A = shape.decode(doc).fold(ps => throw new IllegalStateException(s"$name/$key does not read: ${Problem.render(ps)}"), a => a)
   }
   def keep[A, R[_]](c: Collection[A], a: A)(implicit in: In[Data, R]): Unit ! R = put[R](c.name, c.key(a), c.shape.encode(a))

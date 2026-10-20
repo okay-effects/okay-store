@@ -19,6 +19,7 @@ final case class Mapping[A](collection: String, shape: Shape[A], key: A => Strin
   Data.named(collection)
   /** a path starts here: `mapping.at("qty")` */
   def path: List[String] = Nil
+  type In = A
   def decode(key: String, doc: Json): A = shape.decode(doc).fold(ps => throw new IllegalStateException(s"$collection/$key does not read by its shape: ${Problem.render(ps)}"), a => a)
 }
 

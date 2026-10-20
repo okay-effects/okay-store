@@ -6,13 +6,18 @@ import okay.effects.shape.Shape
 /** SOMETHING OF A TYPE `A` at a path: a mapping, a collection, a path into a value — what `at("field")` is said of, the
  * field checked against `A` by the compiler and the result a `Path` typed as the field (`TypedWords`, each compiler
  * its own) */
-trait Typed[A] { def path: List[String] }
+trait Typed[A] {
+  def path: List[String]
+  /** the type a path goes into: `A`, or the `B` of an `Option[B]` — what `at(_.field)` selects from (Scala 2.13 reads
+   * it here; Scala 3 computes it) */
+  type In
+}
 object Typed extends TypedWords
 
 /** A PATH INTO A VALUE, TYPED: `mapping.at("qty") > 2`, `mapping.at("address").at("city") is "Kyiv"`, `.at("tags") has "y"`
  * — a `Where` or an `Order` with the field's name checked and its type known, the value encoded by the field's shape.
  * `Field("qty")` says the same of a path the compiler cannot check */
-final class Path[T](val path: List[String], val shape: Shape[T]) extends Typed[T] {
+abstract class Path[T](val path: List[String], val shape: Shape[T]) extends Typed[T] {
   def is(t: T): Where = Where.Eq(path, shape.encode(t))
   def isNull: Where = Where.Eq(path, Json.Null)
   def <(t: T): Where = Where.Less(path, shape.encode(t))

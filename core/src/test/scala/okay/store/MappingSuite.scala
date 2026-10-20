@@ -119,6 +119,18 @@ abstract class MappingChecks(val fx0: Runner, name: String) extends munit.FunSui
       mappings.save[Sale, DS](Sale("s1", "ann", "tea", 2)).flatMap(_ => mappings.save[Sale, DS](Sale("s2", "bo", "green tea", 5))).flatMap(_ =>
         mappings.find[Sale, DS](Where.and(Shop.sale.at("qty") > 2, Shop.sale.at("item") contains "TEA"), List(Shop.sale.at("id").asc))))))
     assertEquals(found.map(_.id), List("s2"))
+    // the field selected by a lambda: the same paths
+    final case class Pair(a: Addr, n: Int)
+    val pair: Mapping[Pair] = Mapping("pairs", Shape.derived[Pair], _.n.toString)
+    assertEquals(Shop.sale.at(_.qty) > 2, Field("qty") > 2)
+    assertEquals(Shop.sale.at(_.item) contains "tea", Field("item") contains "tea")
+    assertEquals(who.at(_.address).at(_.city) is "Kyiv", Field("address") / "city" is "Kyiv")
+    assertEquals(pair.at(_.a.city) is "Kyiv", Field("a") / "city" is "Kyiv")
+    assertEquals(who.at(_.tags) has "y", Field("tags") has "y")
+    assertEquals(who.at(_.born) is Some(Day(1990, 5, 6)), Field("born") is "1990-05-06")
+    assertEquals(purchases.at(_.open) is true, Field("open") is true)
+    assert(compileErrors("""Shop.sale.at(_.qty) is "x"""").nonEmpty, "a lambda-selected field keeps its type")
+    assert(compileErrors("""Shop.sale.at(_.toString) is "x"""").contains("a field is selected"))
     assert(compileErrors("""Shop.sale.at("nope")""").contains("no field 'nope'"))
     assert(compileErrors("""Shop.sale.at("qty") is "x"""").nonEmpty, "a value of another type than the field's does not compile")
     assert(compileErrors("""who.at("tags") has 1""").nonEmpty, "an element of another type does not compile")

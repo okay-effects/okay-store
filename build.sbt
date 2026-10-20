@@ -16,9 +16,8 @@ ThisBuild / version := "0.1.0-SNAPSHOT"
 ThisBuild / licenses := List("Apache-2.0" -> url("https://www.apache.org/licenses/LICENSE-2.0.txt"))
 ThisBuild / scalaVersion := scala3
 ThisBuild / resolvers += "okay-effects" at "https://okay-effects.github.io/okay-simple/maven"
-/** okay-simple's snapshot (json, shape) and okay-faces' core (Describe), published locally until released */
+/** okay-simple's snapshot (json, shape, describe), published locally until released */
 val okayEffects = "0.1.1-SNAPSHOT"
-val okayFaces = "0.1.0-SNAPSHOT"
 
 def crossBuilt: Seq[Def.Setting[?]] = Seq(
   crossScalaVersions := Seq(scala3, scala2),
@@ -38,7 +37,7 @@ lazy val core = crossBoth("core", "core").settings(name := "okay-store",
   libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-effects" % okayEffects,
     "io.github.okay-effects" %%% "okay-effects-json" % okayEffects,
     "io.github.okay-effects" %%% "okay-effects-shape" % okayEffects,
-    "io.github.okay-effects" %%% "okay-faces" % okayFaces,
+    "io.github.okay-effects" %%% "okay-effects-describe" % okayEffects,
     "io.github.okay-effects" %%% "okay-effects-machine" % okayEffects % Test,
     "io.github.okay-effects" %%% "okay-effects-free" % okayEffects % Test))
 

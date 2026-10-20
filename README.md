@@ -9,7 +9,7 @@ asks and changes it (`kinds`, `find`, `get`, `history`, `define`, `add`, `revise
 from afar — a program performs `Store` in the browser and it happens on the server.
 
 Scala 3.3 LTS and 2.13, one source; the JVM, Scala.js and Scala Native. On [okay-simple](https://github.com/okay-effects/okay-simple)
-and okay-faces' core alone. The first application is [verity](https://github.com/okay-effects/verity).
+alone. The first application is [verity](https://github.com/okay-effects/verity).
 
 ```scala
 val stores = new Stores[Machine.type]()(Machine)

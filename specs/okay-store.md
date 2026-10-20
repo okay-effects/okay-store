@@ -25,7 +25,7 @@ library.
 and the clock given so a test is deterministic. `find(text, tag)`: text in the fields, tags and note, lowercased;
 a tag that must be present.
 
-`Stores.describe: Describe[Store]` (okay-faces' `Describe`): every operation with its shapes, so `RestDomains` serves it
+`Stores.describe: Describe[Store]` (okay-simple's `describe` module): every operation with its shapes, so `RestDomains` serves it
 at `/store`, `McpFace.domain` as tools, and `remote` performs it from afar. A record's `meta` crosses as JSON.
 
 ## Not here

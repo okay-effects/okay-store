@@ -3,7 +3,7 @@ package okay.store
 import okay.effects.Effects
 import okay.effects.json.Json
 import okay.effects.shape.Shape.{field, int, record, text, unit}
-import okay.face.{Call, Describe, Op}
+import okay.effects.describe.{Call, Describe, Op}
 
 /**
  * THE STORE AS AN EFFECT: what is kept, asked and changed. A program performs it; the handler keeps the state (`Kept`)

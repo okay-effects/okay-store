@@ -5,7 +5,7 @@ import okay.effects.json.Json
 import okay.effects.machine.Machine
 import okay.effects.free.Free
 import okay.effects.shape.{Day, Schema}
-import okay.face.{Domains, Op}
+import okay.effects.describe.{Domains, Op}
 
 /** the journal round trip and its fold; the store's handler; the store described, performed from afar */
 abstract class StoreChecks(val fx0: Runner, name: String) extends munit.FunSuite {

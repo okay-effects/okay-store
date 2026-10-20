@@ -79,6 +79,15 @@ abstract class AgreementChecks(val fx0: Runner, name: String) extends munit.FunS
       assertEquals(fx0.run(sqls.on(c)(datas.count[D]("t", Has(List("tags"), Json.Str("x"))))), 1L)
     } finally c.close()
   }
+  test(s"$name: types mapped, on SQLite: the same answers as in memory") {
+    val shop = new Shop.Of[fx0.type](fx0)
+    import shop.mappings
+    type DC[X] = Sum[D, shop.Cs, X]
+    type DCS[X] = Sum[DC, shop.Ss, X]
+    val c = Sqlite.connect(":memory:")
+    val out = try fx0.run(sqls.on(c)(mappings.onData(Shop.customer)[DC, D, Shop.Out](mappings.onData(Shop.sale)[DCS, DC, Shop.Out](shop.program[DCS])))) finally c.close()
+    assertEquals(out, Shop.expected)
+  }
 }
 class AgreementOnMachine extends AgreementChecks(Machine, "machine")
 class AgreementOnFree extends AgreementChecks(Free, "free")

@@ -1,0 +1,96 @@
+package okay.store
+
+import okay.effects.Effects
+import okay.effects.json.Json
+import okay.effects.shape.{Problem, Shape}
+
+/**
+ * A TYPE MAPPED TO A STORE — the whole of an ORM, on effects and not on proxies. A `Mapping[A]` says what a value of
+ * `A` is in a store: its collection, its `Shape` (the columns, the document, the validation) and its key. With it the
+ * effect `Mapped[A, _]` — save, load, remove, find by a `Where`, count — is the type's own repository, typed by `A`,
+ * and `Mappings.onData(mapping)` is its handler on `Data`, the same for every type and every backend: memory, files,
+ * SQLite, whatever handles `Data`. No proxies, no sessions, no lazy anything: a program performs `save(a)`; where it
+ * goes is the handlers' business, chosen at the edge. Several types are several effects in one row, each its own
+ * handler, as `State[S]` is in okay-simple.
+ */
+final case class Mapping[A](collection: String, shape: Shape[A], key: A => String) {
+  Data.named(collection)
+  def decode(key: String, doc: Json): A = shape.decode(doc).fold(ps => throw new IllegalStateException(s"$collection/$key does not read by its shape: ${Problem.render(ps)}"), a => a)
+}
+
+sealed trait Mapped[A, X]
+object Mapped {
+  /** put, or replace: the key is the value's */
+  final case class Save[A, X](a: A, answer: Unit => X) extends Mapped[A, X]
+  final case class Load[A, X](key: String, answer: Option[A] => X) extends Mapped[A, X]
+  final case class Remove[A, X](key: String, answer: Unit => X) extends Mapped[A, X]
+  final case class Find[A, X](where: Where, order: List[Order], limit: Option[Int], answer: List[A] => X) extends Mapped[A, X]
+  final case class Count[A, X](where: Where, answer: Long => X) extends Mapped[A, X]
+}
+
+/** a path into a document, for a `Where` that reads: `field("qty") > 3`, `field("item") contains "tea"` */
+final case class Field(path: List[String]) {
+  def is(v: Json): Where = Where.Eq(path, v)
+  def is(s: String): Where = is(Json.Str(s))
+  def is(n: Int): Where = is(Json.num(n))
+  def is(n: Long): Where = is(Json.num(n))
+  def is(b: Boolean): Where = is(Json.Bool(b))
+  def isNull: Where = is(Json.Null)
+  def contains(text: String): Where = Where.Contains(path, text)
+  def has(v: Json): Where = Where.Has(path, v)
+  def has(s: String): Where = has(Json.Str(s))
+  def <(v: Json): Where = Where.Less(path, v)
+  def <(n: Int): Where = this < Json.num(n)
+  def <(n: Long): Where = this < Json.num(n)
+  def <(s: String): Where = this < Json.Str(s)
+  def >(v: Json): Where = Where.Greater(path, v)
+  def >(n: Int): Where = this > Json.num(n)
+  def >(n: Long): Where = this > Json.num(n)
+  def >(s: String): Where = this > Json.Str(s)
+  def asc: Order = Order(path)
+  def desc: Order = Order(path, descending = true)
+  def /(name: String): Field = Field(path :+ name)
+}
+object Field { def apply(path: String*): Field = new Field(path.toList) }
+
+class Mappings[F <: Effects](implicit implementation: F) {
+  val fx: F = implementation
+  import fx._
+  val datas: Datas[fx.type] = new Datas[fx.type]()(fx)
+
+  /** the type's effect, as a row's member: `In[Of[A]#L, R]` */
+  type Of[A] = { type L[X] = Mapped[A, X] }
+
+  def save[A, R[_]](a: A)(implicit in: In[({ type L[X] = Mapped[A, X] })#L, R]): Unit ! R =
+    perform[({ type L[X] = Mapped[A, X] })#L].apply[R, Unit](Mapped.Save[A, Unit](a, x => x))
+  def load[A, R[_]](key: String)(implicit in: In[({ type L[X] = Mapped[A, X] })#L, R]): Option[A] ! R =
+    perform[({ type L[X] = Mapped[A, X] })#L].apply[R, Option[A]](Mapped.Load[A, Option[A]](key, x => x))
+  def remove[A, R[_]](key: String)(implicit in: In[({ type L[X] = Mapped[A, X] })#L, R]): Unit ! R =
+    perform[({ type L[X] = Mapped[A, X] })#L].apply[R, Unit](Mapped.Remove[A, Unit](key, x => x))
+  def find[A, R[_]](where: Where = Where.All, order: List[Order] = Nil, limit: Option[Int] = None)(implicit in: In[({ type L[X] = Mapped[A, X] })#L, R]): List[A] ! R =
+    perform[({ type L[X] = Mapped[A, X] })#L].apply[R, List[A]](Mapped.Find[A, List[A]](where, order, limit, x => x))
+  def all[A, R[_]](order: List[Order] = Nil)(implicit in: In[({ type L[X] = Mapped[A, X] })#L, R]): List[A] ! R = find[A, R](Where.All, order)
+  def count[A, R[_]](where: Where = Where.All)(implicit in: In[({ type L[X] = Mapped[A, X] })#L, R]): Long ! R =
+    perform[({ type L[X] = Mapped[A, X] })#L].apply[R, Long](Mapped.Count[A, Long](where, x => x))
+
+  /** THE HANDLER, one for every type: the mapping's effect onto `Data` — a save a put of the encoded value by its
+   * key, a find a query decoded by the shape — so the type is in whatever handles `Data` next */
+  def onData[A](m: Mapping[A]): OnData[A] = new OnData[A](m)
+  final class OnData[A](m: Mapping[A]) {
+    type E[X] = Mapped[A, X]
+    def apply[R[_], Rest[_], B](p: B ! R)(implicit sp: Split[E, R, Rest], d: In[Data, Rest]): B ! Rest =
+      handle[E, R, Rest, B, B](p, new Handler[E, Rest, B, B] {
+        def ret(b: B) = pure(b)
+        def op[X](op: E[X], k: X => B ! Rest) = op match {
+          case Mapped.Save(a, answer) => datas.put[Rest](m.collection, m.key(a), m.shape.encode(a)).flatMap(_ => k(answer(())))
+          case Mapped.Load(key, answer) => datas.get[Rest](m.collection, key).flatMap(d => k(answer(d.map(m.decode(key, _)))))
+          case Mapped.Remove(key, answer) => datas.delete[Rest](m.collection, key).flatMap(_ => k(answer(())))
+          case Mapped.Find(w, o, l, answer) => datas.query[Rest](m.collection, w, o, l).flatMap(ds => k(answer(ds.map { case (key, d) => m.decode(key, d) })))
+          case Mapped.Count(w, answer) => datas.count[Rest](m.collection, w).flatMap(n => k(answer(n)))
+        }
+      })
+  }
+}
+object Mappings {
+  def apply()(implicit fx: Effects): Mappings[fx.type] = { implicit val exact: fx.type = fx; new Mappings[fx.type] }
+}

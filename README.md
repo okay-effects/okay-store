@@ -8,6 +8,10 @@ asks and changes it (`kinds`, `find`, `get`, `history`, `define`, `add`, `revise
 [okay-faces](https://github.com/okay-effects/okay-faces) serves it as REST resources or MCP tools, and performs it
 from afar — a program performs `Store` in the browser and it happens on the server.
 
+TYPES MAPPED, the whole of an ORM on effects: `Mapping[A](collection, shape, key)` makes `Mapped[A, _]` the type's own
+effect — `save`, `load`, `remove`, `find(Field("qty") > 2)`, `count` — and `Mappings.onData(mapping)` is its handler on any
+backend of `Data`, one handler for every type; no proxies, no sessions, a value is a value.
+
 THE LEVEL BELOW: `Data` is collections of JSON documents by key with a query every store can answer (`Where`, `Order`), and
 its backends — memory, lines appended to files, SQL by a dialect in `okay-store-jdbc` (SQLite checked), a document or
 key-value store the same way. A domain effect — `Store`, or an application's own — is handled by a translation into `Data`

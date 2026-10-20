@@ -109,6 +109,39 @@ abstract class DataChecks(val fx0: Runner, name: String) extends munit.FunSuite 
     assertEquals(onLines, reference)
     assert(files.keySet == Set("kinds.jsonl", "versions.jsonl", "retired.jsonl", "events.jsonl", "marks.jsonl"), files.keySet.toString)
   }
+  test(s"$name: atomically: a transaction sees its own writes, the backend sees them when it ends, nothing when it ends early; on memory and on lines; compacted") {
+    import fx0.std._
+    type Er[X] = Sum[Void, ({ type L[x] = Error[String, x] })#L, X]
+    type E[X] = Sum[Er, Data, X]
+    val a = Json.obj("n" -> Json.num(1)); val b = Json.obj("n" -> Json.num(2)); val c = Json.obj("n" -> Json.num(3))
+    def inside[R[_]](implicit in: In[Data, R]) = for {
+      _ <- datas.put[R]("t", "a", a); _ <- datas.put[R]("t", "b", b); _ <- datas.delete[R]("t", "x")
+      seen <- datas.get[R]("t", "a"); gone <- datas.get[R]("t", "x")
+      found <- datas.query[R]("t", Where.Greater(List("n"), Json.num(0)), List(Order.desc("n")), Some(2))
+      n <- datas.count[R]("t", Where.All); key <- datas.fresh[R]("t")
+    } yield (seen, gone, found.map(_._1), n, key)
+    val initial = Map("t" -> Map("x" -> Json.obj("n" -> Json.num(9)), "c" -> c))
+    val memory = new Memory(initial)
+    val out = fx0.run(datas.atomically(memory)[D, Void, (Option[Json], Option[Json], List[String], Long, String)](inside[D]))
+    assertEquals(out, (Some(a), None, List("c", "b"), 3L, "000000000001"))
+    assertEquals(memory.state("t"), Map("a" -> a, "b" -> b, "c" -> c))
+    // ended early: an error attempted outside drops the log — nothing written, the key spent
+    val fresh = new Memory(initial)
+    val early = fx0.run(attempt[String](datas.atomically(fresh)[E, Er, Unit](inside[E].flatMap(_ => raise[String, E, Unit]("no")))))
+    assertEquals(early, Left("no")); assertEquals(fresh.state("t"), initial("t")); assertEquals(fresh.state("_keys")("t"), Json.obj("next" -> Json.num(1)))
+    var files = Map("t.jsonl" -> initial("t").toList.map { case (k, d) => Json.print(Json.obj("key" -> Json.Str(k), "doc" -> d)) })
+    val lines = new Lines(f => files.getOrElse(f, Nil), (f, l) => files = files.updated(f, files.getOrElse(f, Nil) :+ l))
+    assertEquals(fx0.run(datas.atomically(lines)[D, Void, (Option[Json], Option[Json], List[String], Long, String)](inside[D])), out)
+    assertEquals(files("t.jsonl").size, 5, "two kept, two puts and a delete appended")
+    // compacted: one line per key kept
+    lines.compact(List("t"), (f, ls) => files = files.updated(f, ls))
+    assertEquals(files("t.jsonl").size, 3); assertEquals(files("_keys.jsonl").size, 1)
+    assertEquals(fx0.run(datas.on(lines)(datas.query[D]("t", Where.All, List(Order.by("n"))).map(_.map(_._1)))), List("a", "b", "c"))
+    // nested: a transaction over a transaction, the inner's writes seen by the outer, written once at the end
+    val m2 = new Memory()
+    val nested = fx0.run(datas.atomically(m2)[D, Void, Long](datas.put[D]("t", "a", a).flatMap(_ => datas.count[D]("t"))))
+    assertEquals(nested, 1L); assertEquals(m2.state("t").keySet, Set("a"))
+  }
 }
 class DataOnMachine extends DataChecks(Machine, "machine")
 class DataOnFree extends DataChecks(Free, "free")

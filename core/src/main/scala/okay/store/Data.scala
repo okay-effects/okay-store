@@ -4,6 +4,7 @@ import okay.effects.Effects
 import okay.effects.json.{Descent, Json}
 import okay.effects.shape.{Problem, Shape}
 import okay.effects.shape.Shape.{any, bool, deferred, field, record, sub, sum, text, unit}
+import scala.util.chaining._
 
 /**
  * THE LEVEL BELOW A DOMAIN: data as every store keeps it — COLLECTIONS of JSON documents by key, a query over them.
@@ -157,71 +158,137 @@ class Datas[F <: Effects](implicit implementation: F) {
   /** a value made with a key from the store, kept: `add(c, key => Sale(key, ...))` */
   def add[A, R[_]](c: Collection[A], make: String => A)(implicit in: In[Data, R]): A ! R = fresh[R](c.name).flatMap { k => val a = make(k); keep[A, R](c, a).map(_ => a) }
 
-  // ---- THE BACKENDS of no platform: memory, and lines appended to files
-  /** in memory: the collections in a cell, answered in place */
-  def inMemory(initial: Map[String, Map[String, Json]] = Map.empty): InMemory = new InMemory(initial)
-  final class InMemory(initial: Map[String, Map[String, Json]]) {
-    def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Data, R, Rest]): (Map[String, Map[String, Json]], A) ! Rest =
-      handle[Data, Map[String, Map[String, Json]], R, Rest, A, (Map[String, Map[String, Json]], A)](p, initial,
-        new StatefulTailHandler[Data, Map[String, Map[String, Json]], Rest, A, (Map[String, Map[String, Json]], A)] {
-          def ret(s: Map[String, Map[String, Json]], a: A) = pure((s, a))
-          def answer[X](cell: Cell[Map[String, Map[String, Json]]], op: Data[X]): X = {
-            def docs(c: String) = cell.get.getOrElse(Data.named(c), Map.empty[String, Json])
-            op match {
-              case Data.Fresh(c, answer) =>
-                // the sequences in a collection of their own, "_keys", a name no collection may take
-                val keys = cell.get.getOrElse("_keys", Map.empty[String, Json])
-                val next = keys.get(Data.named(c)).flatMap(Where.at(_, List("next"))).collect { case Json.Num(n) => n.toLong }.getOrElse(0L) + 1
-                cell.set(cell.get.updated("_keys", keys.updated(c, Json.obj("next" -> Json.num(next))))); answer(Data.key(next))
-              case Data.Get(c, k, answer) => answer(docs(c).get(k))
-              case Data.Put(c, k, d, answer) => cell.set(cell.get.updated(c, docs(c).updated(k, d))); answer(())
-              case Data.Delete(c, k, answer) => cell.set(cell.get.updated(c, docs(c) - k)); answer(())
-              case Data.Query(c, w, o, l, answer) => answer(Order.select(docs(c).toList, w, o, l))
-              case Data.Count(c, w, answer) => answer(docs(c).count { case (_, d) => Where.holds(w, d) }.toLong)
-            }
-          }
-        })
-  }
-
-  /** ON LINES APPENDED: a collection is a file of lines, `{"key": k, "doc": d}` for a put and `{"key": k, "gone": true}`
-   * for a delete, appended and never rewritten — the last line of a key wins, read by folding the file; crash-safe,
-   * compacted never (yet). `read` and `append` are the platform's: a directory's files (`Directory`), a test's map */
-  def onLines(read: String => List[String], append: (String, String) => Unit): OnLines = new OnLines(read, append)
-  final class OnLines(read: String => List[String], append: (String, String) => Unit) {
-    private def file(c: String) = Data.named(c) + ".jsonl"
-    private def docs(c: String): Map[String, Json] = read(file(c)).filter(_.trim.nonEmpty).foldLeft(Map.empty[String, Json]) { (m, line) =>
-      Descent.parse(line).toOption match {
-        case Some(o: Json.Obj) => (o.get("key"), o.get("doc"), o.get("gone")) match {
-          case (Some(Json.Str(k)), Some(d), _) => m.updated(k, d)
-          case (Some(Json.Str(k)), None, Some(Json.Bool(true))) => m - k
-          case _ => m
-        }
-        case _ => m
-      }
-    }
-    /** the sequences: a line per key given, `{"collection": c, "next": n}`, the last of a collection its count */
-    private def nextOf(c: String): Long = read("_keys.jsonl").foldLeft(0L) { (n, line) =>
-      Descent.parse(line).toOption match {
-        case Some(o: Json.Obj) if o.get("collection").contains(Json.Str(c)) => o.get("next").collect { case Json.Num(x) => x.toLong }.getOrElse(n)
-        case _ => n
-      }
-    }
+  // ---- THE BACKENDS: what answers `Data` in place, and the handler over one
+  /** the handler: every operation answered by the backend, in place */
+  def on(backend: Backend): On = new On(backend)
+  final class On(backend: Backend) {
     def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Data, R, Rest]): A ! Rest =
       handle[Data, R, Rest, A, A](p, new TailHandler[Data, Rest, A, A] {
         def ret(a: A) = pure(a)
-        def answer[X](op: Data[X]): X = op match {
-          case Data.Fresh(c, answer) =>
-            val next = nextOf(Data.named(c)) + 1
-            append("_keys.jsonl", Json.print(Json.obj("collection" -> Json.Str(c), "next" -> Json.num(next)))); answer(Data.key(next))
-          case Data.Get(c, k, answer) => answer(docs(c).get(k))
-          case Data.Put(c, k, d, answer) => append(file(c), Json.print(Json.obj("key" -> Json.Str(k), "doc" -> d))); answer(())
-          case Data.Delete(c, k, answer) => append(file(c), Json.print(Json.obj("key" -> Json.Str(k), "gone" -> Json.Bool(true)))); answer(())
-          case Data.Query(c, w, o, l, answer) => answer(Order.select(docs(c).toList, w, o, l))
-          case Data.Count(c, w, answer) => answer(docs(c).count { case (_, d) => Where.holds(w, d) }.toLong)
-        }
+        def answer[X](op: Data[X]): X = backend.answer(op)
+      })
+  }
+  /** in memory: the collections in a `Memory`, the state answered with the value */
+  def inMemory(initial: Map[String, Map[String, Json]] = Map.empty): InMemory = new InMemory(initial)
+  final class InMemory(initial: Map[String, Map[String, Json]]) {
+    def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Data, R, Rest]): (Map[String, Map[String, Json]], A) ! Rest = {
+      val memory = new Memory(initial)
+      on(memory)(p).map(a => (memory.state, a))
+    }
+  }
+  /** on lines appended to files: `Lines`, with `compact` beside it */
+  def onLines(read: String => List[String], append: (String, String) => Unit): OnLines = new OnLines(new Lines(read, append))
+  final class OnLines(val lines: Lines) {
+    def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Data, R, Rest]): A ! Rest = on(lines)(p)
+    def compact(collections: List[String], write: (String, List[String]) => Unit): Unit = lines.compact(collections, write)
+  }
+
+  /** ATOMICALLY: `p`'s writes kept in a log of its own (`Transaction`) and written to the backend when `p` ends — a
+   * read sees the log first, a query the backend's rows with the log laid over them, in the reference's order — so
+   * what ends `p` before (an error attempted outside, an abort) drops the log and nothing is written. The same on
+   * every backend, as okay-simple's `transaction` is over its `Store`; a backend's own transaction is a later speed,
+   * not a meaning. `Fresh` goes to the backend at once: a key given to a transaction that ends early is spent, never
+   * given twice. Nested, a transaction is over a transaction */
+  def atomically(backend: Backend): Atomically = new Atomically(backend)
+  final class Atomically(backend: Backend) {
+    def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Data, R, Rest]): A ! Rest =
+      handle[Data, R, Rest, A, A](p, new TailHandler[Data, Rest, A, A] {
+        val transaction = new Transaction(backend)
+        def ret(a: A) = { transaction.commit(); pure(a) }
+        def answer[X](op: Data[X]): X = transaction.answer(op)
       })
   }
 }
+
+/** A BACKEND: what answers `Data` in place — memory, files, a database — one value, handled by `Datas.on` */
+trait Backend { def answer[X](op: Data[X]): X }
+
+/** IN MEMORY: the collections in a map; the sequences in `_keys`, a name no collection may take */
+final class Memory(initial: Map[String, Map[String, Json]] = Map.empty) extends Backend {
+  @volatile var state: Map[String, Map[String, Json]] = initial
+  private def docs(c: String) = state.getOrElse(Data.named(c), Map.empty[String, Json])
+  def answer[X](op: Data[X]): X = op match {
+    case Data.Fresh(c, answer) =>
+      val keys = state.getOrElse("_keys", Map.empty[String, Json])
+      val next = keys.get(Data.named(c)).flatMap(Where.at(_, List("next"))).collect { case Json.Num(n) => n.toLong }.getOrElse(0L) + 1
+      state = state.updated("_keys", keys.updated(c, Json.obj("next" -> Json.num(next)))); answer(Data.key(next))
+    case Data.Get(c, k, answer) => answer(docs(c).get(k))
+    case Data.Put(c, k, d, answer) => state = state.updated(c, docs(c).updated(k, d)); answer(())
+    case Data.Delete(c, k, answer) => state = state.updated(c, docs(c) - k); answer(())
+    case Data.Query(c, w, o, l, answer) => answer(Order.select(docs(c).toList, w, o, l))
+    case Data.Count(c, w, answer) => answer(docs(c).count { case (_, d) => Where.holds(w, d) }.toLong)
+  }
+}
+
+/** ON LINES APPENDED: a collection is a file of lines, `{"key": k, "doc": d}` for a put and `{"key": k, "gone": true}`
+ * for a delete, appended and never rewritten — the last line of a key wins, read by folding the file; crash-safe.
+ * `read` and `append` are the platform's: a directory's files (`Directory`), a test's map. `compact` rewrites a file
+ * as one line per key kept, by `write` — housekeeping at the edge, by the one who holds the files */
+final class Lines(read: String => List[String], append: (String, String) => Unit) extends Backend {
+  private def file(c: String) = Data.named(c) + ".jsonl"
+  private def docs(c: String): Map[String, Json] = read(file(c)).filter(_.trim.nonEmpty).foldLeft(Map.empty[String, Json]) { (m, line) =>
+    Descent.parse(line).toOption match {
+      case Some(o: Json.Obj) => (o.get("key"), o.get("doc"), o.get("gone")) match {
+        case (Some(Json.Str(k)), Some(d), _) => m.updated(k, d)
+        case (Some(Json.Str(k)), None, Some(Json.Bool(true))) => m - k
+        case _ => m
+      }
+      case _ => m
+    }
+  }
+  /** the sequences: a line per key given, `{"collection": c, "next": n}`, the last of a collection its count */
+  private def counts: Map[String, Long] = read("_keys.jsonl").foldLeft(Map.empty[String, Long]) { (m, line) =>
+    Descent.parse(line).toOption match {
+      case Some(o: Json.Obj) => (o.get("collection"), o.get("next")) match { case (Some(Json.Str(c)), Some(Json.Num(n))) => m.updated(c, n.toLong); case _ => m }
+      case _ => m
+    }
+  }
+  def answer[X](op: Data[X]): X = op match {
+    case Data.Fresh(c, answer) =>
+      val next = counts.getOrElse(Data.named(c), 0L) + 1
+      append("_keys.jsonl", Json.print(Json.obj("collection" -> Json.Str(c), "next" -> Json.num(next)))); answer(Data.key(next))
+    case Data.Get(c, k, answer) => answer(docs(c).get(k))
+    case Data.Put(c, k, d, answer) => append(file(c), Json.print(Json.obj("key" -> Json.Str(k), "doc" -> d))); answer(())
+    case Data.Delete(c, k, answer) => append(file(c), Json.print(Json.obj("key" -> Json.Str(k), "gone" -> Json.Bool(true)))); answer(())
+    case Data.Query(c, w, o, l, answer) => answer(Order.select(docs(c).toList, w, o, l))
+    case Data.Count(c, w, answer) => answer(docs(c).count { case (_, d) => Where.holds(w, d) }.toLong)
+  }
+  def compact(collections: List[String], write: (String, List[String]) => Unit): Unit = {
+    collections.foreach { c => write(file(c), docs(c).toList.map { case (k, d) => Json.print(Json.obj("key" -> Json.Str(k), "doc" -> d)) }) }
+    val cs = counts
+    if (cs.nonEmpty) write("_keys.jsonl", cs.toList.sortBy(_._1).map { case (c, n) => Json.print(Json.obj("collection" -> Json.Str(c), "next" -> Json.num(n))) })
+  }
+}
+
+/** A TRANSACTION over a backend: the writes in a log until `commit`, the reads through it — `Datas.atomically` */
+final class Transaction(under: Backend) extends Backend {
+  /** a collection's keys to a document, or to nothing for a delete */
+  @volatile var log: Map[String, Map[String, Option[Json]]] = Map.empty
+  private def of(c: String) = log.getOrElse(c, Map.empty[String, Option[Json]])
+  private def overlay(c: String, rows: List[(String, Json)], w: Where, o: List[Order], l: Option[Int]): List[(String, Json)] = {
+    val kept = rows.filterNot { case (key, _) => of(c).contains(key) } ++ of(c).toList.collect { case (key, Some(d)) if Where.holds(w, d) => (key, d) }
+    val sorted = Order.sort(kept, o)
+    l.fold(sorted)(sorted.take)
+  }
+  def answer[X](op: Data[X]): X = op match {
+    case Data.Get(c, key, answer) => of(c).get(key) match { case Some(d) => answer(d); case None => under.answer(Data.Get(c, key, x => x)).pipe(answer) }
+    case Data.Put(c, key, doc, answer) => log = log.updated(c, of(c).updated(key, Some(doc))); answer(())
+    case Data.Delete(c, key, answer) => log = log.updated(c, of(c).updated(key, None)); answer(())
+    case Data.Query(c, w, o, l, answer) =>
+      if (of(c).isEmpty) answer(under.answer(Data.Query(c, w, o, l, x => x)))
+      else answer(overlay(c, under.answer(Data.Query(c, w, o, None, x => x)), w, o, l))
+    case Data.Count(c, w, answer) =>
+      if (of(c).isEmpty) answer(under.answer(Data.Count(c, w, x => x)))
+      else answer(overlay(c, under.answer(Data.Query(c, w, Nil, None, x => x)), w, Nil, None).size.toLong)
+    case Data.Fresh(c, answer) => answer(under.answer(Data.Fresh(c, x => x)))
+  }
+  /** the log written to the backend, in order, and emptied */
+  def commit(): Unit = {
+    log.foreach { case (c, ks) => ks.foreach { case (key, Some(d)) => under.answer(Data.Put(c, key, d, x => x)); case (key, None) => under.answer(Data.Delete(c, key, x => x)) } }
+    log = Map.empty
+  }
+}
+
 object Datas {
   def apply()(implicit fx: Effects): Datas[fx.type] = { implicit val exact: fx.type = fx; new Datas[fx.type] }
 }

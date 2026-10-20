@@ -3,7 +3,7 @@ package okay.store.jdbc
 import java.sql.Connection
 import okay.effects.Effects
 import okay.effects.json.{Descent, Json}
-import okay.store.{Data, Order, Where}
+import okay.store.{Backend, Data, Datas, Order, Where}
 
 /**
  * `Data` ON SQL: a collection a table of `(key, doc)`, the document a JSON text, made on first use; a `Where` compiled
@@ -77,11 +77,22 @@ object Dialect {
 
 class Sqls[F <: Effects](implicit implementation: F) {
   val fx: F = implementation
-  import fx._
+  val datas: Datas[fx.type] = new Datas[fx.type]()(fx)
+  /** the backend: `Data` on this connection, by the dialect */
+  def backend(c: Connection, dialect: Dialect = Dialect.sqlite): Sql = new Sql(c, dialect)
+  /** the handler over it */
+  def on(c: Connection, dialect: Dialect = Dialect.sqlite): datas.On = datas.on(backend(c, dialect))
+}
+object Sqls {
+  def apply()(implicit fx: Effects): Sqls[fx.type] = { implicit val exact: fx.type = fx; new Sqls[fx.type] }
+  /** two-valued: a condition that is NULL is false */
+  def sure(condition: String): String = s"COALESCE(($condition), FALSE)"
+}
 
-  def on(c: Connection, dialect: Dialect = Dialect.sqlite): On = new On(c, dialect)
-  final class On(c: Connection, dialect: Dialect) {
-    import Jdbc.{query => rows, update}
+/** `Data` ON A CONNECTION, a `Backend`: a table `(key, doc)` per collection made on first use; a `Where` compiled by
+ * the dialect */
+final class Sql(c: Connection, dialect: Dialect) extends Backend {
+  import Jdbc.{query => rows, update}
     private val made = scala.collection.mutable.Set.empty[String]
     private lazy val keys: Unit = Dialect.keysTable(c, dialect)
     private def table(collection: String): String = {
@@ -110,10 +121,7 @@ class Sqls[F <: Effects](implicit implementation: F) {
       if (order.isEmpty) "" else " ORDER BY " + order.map(o => dialect.extract("doc", o.path) + (if (o.descending) " DESC" else " ASC")).mkString(", ")
     private def doc(text: String): Json = Descent.parse(text).fold(e => throw new IllegalStateException(s"a document in the database does not parse: ${e.message}"), j => j)
 
-    def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Data, R, Rest]): A ! Rest =
-      handle[Data, R, Rest, A, A](p, new TailHandler[Data, Rest, A, A] {
-        def ret(a: A) = pure(a)
-        def answer[X](op: Data[X]): X = op match {
+    def answer[X](op: Data[X]): X = op match {
           case Data.Fresh(col, k) => keys; k(Dialect.fresh(c, dialect, Data.named(col)))
           case Data.Get(col, key, k) => k(rows(c, s"""SELECT doc FROM "${table(col)}" WHERE key = ?""", key)(rs => doc(rs.getString(1))).headOption)
           case Data.Put(col, key, d, k) => update(c, dialect.upsert(table(col), List("key", "doc")), key, Json.print(d)); k(())
@@ -126,11 +134,4 @@ class Sqls[F <: Effects](implicit implementation: F) {
             val (cond, params) = condition(w)
             k(rows(c, s"""SELECT COUNT(*) FROM "${table(col)}" WHERE $cond""", params: _*)(_.getLong(1)).head)
         }
-      })
   }
-}
-object Sqls {
-  def apply()(implicit fx: Effects): Sqls[fx.type] = { implicit val exact: fx.type = fx; new Sqls[fx.type] }
-  /** two-valued: a condition that is NULL is false */
-  def sure(condition: String): String = s"COALESCE(($condition), FALSE)"
-}

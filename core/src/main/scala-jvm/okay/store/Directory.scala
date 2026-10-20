@@ -9,6 +9,10 @@ object Directory {
     val p = Paths.get(dir, name)
     if (Files.exists(p)) Files.readAllLines(p).asScala.toList else Nil
   }
+  def write(dir: String)(name: String, lines: List[String]): Unit = {
+    val p = Paths.get(dir, name); Files.createDirectories(p.getParent)
+    Files.write(p, lines.map(_ + "\n").mkString.getBytes("UTF-8"), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE); ()
+  }
   def append(dir: String)(name: String, line: String): Unit = {
     val p = Paths.get(dir, name); Files.createDirectories(p.getParent)
     Files.write(p, (line + "\n").getBytes("UTF-8"), StandardOpenOption.CREATE, StandardOpenOption.APPEND, StandardOpenOption.WRITE); ()

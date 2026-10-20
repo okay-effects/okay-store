@@ -16,7 +16,7 @@ Read before anything else; then `specs/okay-store.md`.
   compiler (`TypedWords`, each compiler its own, on okay-simple's `ShapeDerivation`/`ShapeMacros`); `Field(...)` is for
   paths the compiler cannot know.
 - `Data` (core) is the level below every domain: collections of JSON documents, a `Where`/`Order` query with reference
-  semantics (`Where.holds`, `Order.select`); backends in memory, on lines, on SQL (`jdbc`, by a `Dialect`). A domain's
+  semantics (`Where.holds`, `Order.select`); backends as values (`Memory`, `Lines`, `Sql` in `jdbc` by a `Dialect`) handled by `Datas.on`; `Transaction` over any. A domain's
   handler is a translation into `Data` over typed collections; the direct handlers are the particular mappings. A
   backend is right when it answers as the reference on the same documents — the tests say so, not the backend.
 - `jdbc/`: the same effect on a database, the JVM; SQLite always, Postgres when `OKAY_PG=jdbc:postgresql://host:port/db?user=u&password=p`

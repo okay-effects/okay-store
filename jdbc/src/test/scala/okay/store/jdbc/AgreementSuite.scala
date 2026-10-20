@@ -154,6 +154,21 @@ abstract class AgreementChecks(val fx0: Runner, name: String) extends munit.FunS
     assertEquals(viaTable, ("000000000001", "000000000002"))
     f.delete()
   }
+  test(s"$name: atomically over SQL: the writes seen within, written at the end, none when the transaction ends early") {
+    import fx0.std._
+    type Er[X] = Sum[Void, ({ type L[x] = Error[String, x] })#L, X]
+    type E[X] = Sum[Er, Data, X]
+    val c = Sqlite.connect(":memory:")
+    val sql = sqls.backend(c)
+    try {
+      val a = Json.obj("n" -> Json.num(1))
+      def inside[R[_]](implicit in: In[Data, R]) = datas.put[R]("t", "a", a).flatMap(_ => datas.count[R]("t")).flatMap(n => datas.get[R]("t", "a").map(d => (n, d)))
+      assertEquals(fx0.run(datas.atomically(sql)[D, Void, (Long, Option[Json])](inside[D])), (1L, Some(a)))
+      assertEquals(fx0.run(datas.on(sql)(datas.count[D]("t"))), 1L)
+      val early = fx0.run(attempt[String](datas.atomically(sql)[E, Er, Unit](datas.put[E]("t", "b", a).flatMap(_ => raise[String, E, Unit]("no")))))
+      assertEquals(early, Left("no")); assertEquals(fx0.run(datas.on(sql)(datas.count[D]("t"))), 1L)
+    } finally c.close()
+  }
 }
 class AgreementOnMachine extends AgreementChecks(Machine, "machine")
 class AgreementOnFree extends AgreementChecks(Free, "free")

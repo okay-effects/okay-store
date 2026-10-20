@@ -51,8 +51,18 @@ values, not names), `Has` (an element of an array), `Less`, `Greater`, `And`, `O
 test compiles every form and compares with the reference on the same documents. What `Where` cannot say (a join, a
 group) the translation does above the backend, in the program — honestly slower, and still right.
 
-Backends built: `Datas.inMemory` (a cell), `Datas.onLines(read, append)` (a collection a file of lines appended,
-`{"key", "doc"}` or `{"key", "gone": true}`, the last line of a key winning; `Directory.read/append` on the JVM),
+A backend is a VALUE, `Backend { def answer[X](op: Data[X]): X }`, handled by `Datas.on(backend)`: `Memory(initial)`
+(its `state` read after), `Lines(read, append)` (a collection a file of lines appended, `{"key", "doc"}` or `{"key",
+"gone": true}`, the last line of a key winning; `Directory.read/append/write` on the JVM; `compact(collections, write)`
+rewrites a file as one line per key kept — housekeeping at the edge, by whoever holds the files), `Sql(connection,
+dialect)` in `jdbc`; `Datas.inMemory`/`onLines` and `Sqls.on` are the words over them. `Transaction(under)` is a
+backend over a backend (`Datas.atomically(backend)(p)`): `p`'s writes in a log, its reads through it, a query the
+backend's rows with the log laid over in the reference's order, all written when `p` ends — so an error attempted
+outside, or an abort, ending `p` early writes nothing; `Fresh` goes through at once, a key spent is never given
+twice; nested, a transaction is over a transaction. The same on every backend, as okay-simple's `transaction` is
+over its `Store`; a database's own transaction is a later speed, not a meaning. Checked on memory, lines and SQLite.
+
+Backends built, then: `Memory`, `Lines`,
 `Sqls.on(connection, dialect)` in `jdbc` (a table `(key, doc)` per collection made on first use; `Dialect.sqlite`
 checked — `json_extract`, `json_tree` for the leaves within, `json_each` for an array, `json_type` for JSON's null as
 distinct from missing; `Dialect.postgres` CHECKED against a Postgres 17 in Docker (`PostgresSuite`, run when
@@ -78,7 +88,7 @@ store keeps it the same way, under a reserved name.
 
 Agreement, checked on the machine and on Free: `StorePrograms` is one program of the store; `keeping`, `onData` on
 memory, on lines, on SQLite, and `Jdbcs.on` answer it alike. `Programs` is one program of `Purchases`; memory, lines
-and SQLite answer it alike. Compaction of the lines, transactions across operations, a cache over `onLines`: not done.
+and SQLite answer it alike. A cache over `Lines` (the file folded at every read): not done.
 
 ## Mapping — a type mapped, the whole of an ORM (2026-10-20)
 

@@ -13,7 +13,7 @@ import okay.store.{Mapped, Mapping, Order, Where}
  * leaf compared as a column, a path into a nested column by the dialect's JSON functions. The table reads with the
  * database's own tools, as an ORM's would. The same effect, the same answers as `Mappings.onData` on any backend.
  */
-class Tables[F <: Effects](implicit implementation: F) {
+class Tables[F <: Effects with Singleton](implicit implementation: F) {
   val fx: F = implementation
   import fx._
 

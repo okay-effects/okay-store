@@ -130,7 +130,7 @@ object Order {
   }
 }
 
-class Datas[F <: Effects](implicit implementation: F) {
+class Datas[F <: Effects with Singleton](implicit implementation: F) {
   val fx: F = implementation
   import fx._
 

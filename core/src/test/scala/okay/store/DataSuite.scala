@@ -19,7 +19,7 @@ object Purchases {
   final case class Close[X](id: String, answer: Boolean => X) extends Purchases[X]
 
   /** the handler: each operation a few words over one typed collection; the backend is whoever handles `Data` */
-  final class OnData[F <: okay.effects.Effects](val datas: Datas[F], ids: () => String) {
+  final class OnData[F <: okay.effects.Effects with Singleton](val datas: Datas[F], ids: () => String) {
     import datas.fx._
     import datas._
     val purchases: Collection[Purchase] = Collection("purchases", Purchase.shape, _.id)
@@ -43,7 +43,7 @@ object Purchases {
 object Programs {
   def ids(): () => String = { var n = 0; () => { n += 1; f"p$n%03d" } }
   type Out = (List[Purchase], List[Purchase], Boolean, Boolean, List[Purchase])
-  final class Of[F <: Runner](val fx0: F) {
+  final class Of[F <: Runner with Singleton](val fx0: F) {
     import fx0._
     def purchasing[P[_]](implicit in: In[Purchases, P]): Out ! P = {
       def place(item: String, qty: Int): Purchase ! P = perform[Purchases].apply[P, Purchase](Purchases.Place(item, qty, x => x))

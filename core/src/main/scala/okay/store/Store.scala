@@ -29,7 +29,7 @@ object Store {
   final case class Saved[X](answer: Unit => X) extends Store[X]
 }
 
-class Stores[F <: Effects](implicit implementation: F) {
+class Stores[F <: Effects with Singleton](implicit implementation: F) {
   val fx: F = implementation
   import fx._
 

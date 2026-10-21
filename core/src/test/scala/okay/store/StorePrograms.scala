@@ -16,7 +16,7 @@ object StorePrograms {
 
   type Out = (List[Kind], List[Record], List[Record], List[Record], Option[Record], List[Record], List[Record], (List[Event], Int), Int)
   /** the program over an implementation: `new StorePrograms.Of(fx).program` */
-  final class Of[F <: okay.effects.Runner](val fx0: F) {
+  final class Of[F <: okay.effects.Runner with Singleton](val fx0: F) {
     val stores: Stores[fx0.type] = new Stores[fx0.type]()(fx0)
     import fx0._
     import stores._

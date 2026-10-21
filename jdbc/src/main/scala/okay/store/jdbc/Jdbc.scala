@@ -60,7 +60,7 @@ object Jdbc {
   def tagsText(r: Record): String = r.tags.toList.sorted.mkString(" ", " ", " ")
 }
 
-class Jdbcs[F <: Effects](implicit implementation: F) {
+class Jdbcs[F <: Effects with Singleton](implicit implementation: F) {
   val fx: F = implementation
   import fx._
 

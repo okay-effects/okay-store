@@ -23,7 +23,7 @@ object Shop {
     List(Sale("s2", "ann", "green tea", 5), Sale("s3", "bo", "tea", 3)))
 
   /** the program over an implementation, in any row that has both effects */
-  final class Of[F <: Runner](val fx0: F) {
+  final class Of[F <: Runner with Singleton](val fx0: F) {
     val mappings: Mappings[fx0.type] = new Mappings[fx0.type]()(fx0)
     import fx0._
     import mappings._

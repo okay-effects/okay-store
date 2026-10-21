@@ -75,7 +75,7 @@ object Dialect {
     Data.key(Jdbc.query(c, dialect.fresh("_keys"), collection)(_.getLong(1)).head)
 }
 
-class Sqls[F <: Effects](implicit implementation: F) {
+class Sqls[F <: Effects with Singleton](implicit implementation: F) {
   val fx: F = implementation
   val datas: Datas[fx.type] = new Datas[fx.type]()(fx)
   /** the backend: `Data` on this connection, by the dialect */

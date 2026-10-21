@@ -112,7 +112,7 @@ final case class Field(path: List[String]) {
 }
 object Field { def apply(path: String*): Field = new Field(path.toList) }
 
-class Mappings[F <: Effects](implicit implementation: F) {
+class Mappings[F <: Effects with Singleton](implicit implementation: F) {
   val fx: F = implementation
   import fx._
   val datas: Datas[fx.type] = new Datas[fx.type]()(fx)

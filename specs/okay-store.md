@@ -10,7 +10,11 @@ what was verity's own taken out and put into `meta`.
 - `Record(id, version, parent, kind, fields, meta, tags, note, at)`: `fields` by the kind's schema; `meta`, the
   application's JSON beside them (verity: context and validity); tags and a note, which `find` searches.
 - `Event`: `KindDefined`, `KindRevised`, `RecordAdded`, `RecordRevised`, `RecordRetired`, `Accessed(id, field, by, at)` —
-  the last is the audit: who saw which field. Every event has `at`.
+  the last is the audit: who saw which field. Every event has `at`, and `eid` (2026-10-23), its identity, minted by
+  the handler from its `ids` (the last parameter, defaulting to `EventId.none`, so an event is still made without
+  one). `Event.identity(e)` is the `eid`, or for an event without one (a journal written before ids) a hash of what
+  it says — so an old journal reads, and the same event read twice is known as the same. The journal is appended
+  to and never rewritten; identity is what lets a writer append only what a file lacks.
 - `Journal`: `Header(format, version, created)` as the first line, then an event a line; `read` reports a damaged line
   by number and skips it; `write`.
 - `Kept(kinds, versions, retired, events, unsaved)`: the fold; `Kept.empty(kinds)` with an application's built-in kinds.
@@ -21,10 +25,16 @@ library.
 
 ## The effect
 
-`Store` with eleven operations; `Stores[F]` the words and `keeping(initial, ids, now)`, the handler in memory with ids
+`Store` with twelve operations; `Stores[F]` the words and `keeping(initial, ids, now)`, the handler in memory with ids
 and the clock given so a test is deterministic; `keeping(initial, ids, now, seen)` the same, what is kept told to
 `seen` after every change, for whoever must see it while the program still runs. `find(text, tag)`: text in the fields, tags and note, lowercased;
 a tag that must be present.
+
+`adopt(journal)` (2026-10-23): the journal as written — by this store and by any other writer of the same file —
+taken in. In memory, what is kept becomes the journal's fold (an event once, by identity), the store's own events
+the journal lacks after it, those unsaved: a writer that appended its own and adopts the file is the file's fold,
+nothing unsaved. On `Data` and on a database, the store is its own truth: the journal's events it lacks are taken
+in after its own, in the journal's order.
 
 `Stores.describe: Describe[Store]` (okay-simple's `describe` module): every operation with its shapes, so `RestDomains` serves it
 at `/store`, `McpFace.domain` as tools, and `remote` performs it from afar. A record's `meta` crosses as JSON.

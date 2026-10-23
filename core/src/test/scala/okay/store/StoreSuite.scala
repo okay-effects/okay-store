@@ -47,6 +47,10 @@ abstract class StoreChecks(val fx0: Runner, name: String) extends munit.FunSuite
     assertEquals(found.map(_.fields.get("number")), List(Some(Json.Str("AB124")))); assertEquals(h.size, 2); assertEquals(gone, None); assertEquals(n, 5)
     assertEquals(kept.unsaved, 0); assertEquals(kept.events.collect { case e: Event.Accessed => e.by }, List("owner"))
     assertEquals(fx0.run(keeping(kept, ids(), () => 8L)(find[S]("", Some("new"))))._2, Nil)
+    // seen: what is kept after every change, as it stands — six changes, the last the handler's own end state
+    var told: List[Kept] = Nil
+    val (watched, _) = fx0.run(keeping(Kept.empty(), ids(), () => 7L, k => told = k :: told)(program))
+    assertEquals(told.size, 6); assertEquals(told.head, watched); assertEquals(told.tail.head.unsaved, 5)
   }
   test(s"$name: described: the same program answers the same when the store is performed from afar") {
     val program: (List[Record], List[Record], Int) ! S =

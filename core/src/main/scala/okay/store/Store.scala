@@ -49,13 +49,21 @@ class Stores[F <: Effects with Singleton](implicit implementation: F) {
 
   /** THE HANDLER IN MEMORY: what is kept in a cell, in place; ids and the clock given, so a test is deterministic.
    * `find` is `Stores.matches`: by text in the fields' values, the tags and the note, and by a tag */
-  def keeping(initial: Kept, ids: () => String, now: () => Long): Keeping = new Keeping(initial, ids, now)
-  final class Keeping(initial: Kept, ids: () => String, now: () => Long) {
+  def keeping(initial: Kept, ids: () => String, now: () => Long): Keeping = new Keeping(initial, ids, now, _ => ())
+  /** the same, what is kept told to `seen` after every change: whoever holds the handler sees its state as it stands,
+   * while the program still runs (a session that never ends, a test played to a screen) */
+  def keeping(initial: Kept, ids: () => String, now: () => Long, seen: Kept => Unit): Keeping = new Keeping(initial, ids, now, seen)
+  final class Keeping(initial: Kept, ids: () => String, now: () => Long, seen: Kept => Unit) {
     def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Store, R, Rest]): (Kept, A) ! Rest =
       handle[Store, Kept, R, Rest, A, (Kept, A)](p, initial, new StatefulTailHandler[Store, Kept, Rest, A, (Kept, A)] {
         def ret(v: Kept, a: A) = pure((v, a))
         def answer[X](cell: Cell[Kept], op: Store[X]): X = {
           val v = cell.get
+          val x = answered(cell, v, op)
+          if (cell.get ne v) seen(cell.get)
+          x
+        }
+        private def answered[X](cell: Cell[Kept], v: Kept, op: Store[X]): X = {
           op match {
             case Store.Kinds(answer) => answer(v.kinds.values.toList.sortBy(_.name))
             case Store.Find(text, tag, answer) => answer(v.records.filter(r => Stores.matches(text, tag, r)))

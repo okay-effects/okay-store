@@ -22,7 +22,8 @@ library.
 ## The effect
 
 `Store` with eleven operations; `Stores[F]` the words and `keeping(initial, ids, now)`, the handler in memory with ids
-and the clock given so a test is deterministic. `find(text, tag)`: text in the fields, tags and note, lowercased;
+and the clock given so a test is deterministic; `keeping(initial, ids, now, seen)` the same, what is kept told to
+`seen` after every change, for whoever must see it while the program still runs. `find(text, tag)`: text in the fields, tags and note, lowercased;
 a tag that must be present.
 
 `Stores.describe: Describe[Store]` (okay-simple's `describe` module): every operation with its shapes, so `RestDomains` serves it

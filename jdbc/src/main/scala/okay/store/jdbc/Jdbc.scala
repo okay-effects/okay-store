@@ -3,7 +3,7 @@ package okay.store.jdbc
 import java.sql.{Connection, DriverManager, PreparedStatement, ResultSet}
 import okay.effects.Effects
 import okay.effects.json.{Descent, Json}
-import okay.store.{Event, Kind, Record, RecordId, Store, VersionId}
+import okay.store.{Event, EventId, Kind, Record, RecordId, Store, VersionId}
 
 /**
  * THE STORE ON A DATABASE: the same effect, another handler. A record is a row of `versions` — its JSON by
@@ -71,8 +71,29 @@ class Jdbcs[F <: Effects with Singleton](implicit implementation: F) {
     private val currentSql = "SELECT v.json FROM versions v WHERE v.rowid = (SELECT MAX(rowid) FROM versions w WHERE w.id = v.id) AND v.id NOT IN (SELECT id FROM retired)"
     private def current(id: RecordId): Option[Record] = query(c, currentSql + " AND v.id = ?", id.value)(rs => record(rs.getString(1))).headOption
     private def note(e: Event): Unit = { update(c, "INSERT INTO events (at, json) VALUES (?, ?)", e.at, Json.print(Event.shape.encode(e))); () }
-    private def insert(r: Record): Unit = {
-      update(c, "INSERT INTO versions (version, id, parent, kind, at, search, tags, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    private def eid(): EventId = EventId(ids())
+    private def putKind(kind: Kind): Unit = {
+      update(c, "INSERT OR REPLACE INTO kinds (id, name, json) VALUES (?, ?, ?)", kind.id.value, kind.name,
+        Json.print(Kind.shape.encode(kind))); ()
+    }
+    private def retire(id: RecordId, reason: Option[String], at: Long): Unit = {
+      update(c, "INSERT OR REPLACE INTO retired (id, reason, at) VALUES (?, ?, ?)", id.value, reason, at); ()
+    }
+    /** an event from elsewhere taken in, as its operation would have written it; a version already here stays */
+    private def taken(e: Event): Unit = {
+      e match {
+        case Event.KindDefined(kind, _, _) => putKind(kind)
+        case Event.KindRevised(kind, _, _) => putKind(kind)
+        case Event.RecordAdded(r, _) => insert(r, "INSERT OR IGNORE")
+        case Event.RecordRevised(r, _) => insert(r, "INSERT OR IGNORE")
+        case Event.RecordRetired(id, reason, at, _) => retire(id, reason, at)
+        case _: Event.Accessed => ()
+      }
+      note(e)
+    }
+    private def insert(r: Record, verb: String = "INSERT"): Unit = {
+      update(c, verb + " INTO versions (version, id, parent, kind, at, search, tags, json)" +
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         r.version.value, r.id.value, r.parent.map(_.value), r.kind.value, r.at, searchText(r), tagsText(r), Json.print(Record.shape.encode(r))); ()
     }
 
@@ -93,24 +114,27 @@ class Jdbcs[F <: Effects with Singleton](implicit implementation: F) {
           case Store.Get(id, k) => k(current(id))
           case Store.History(id, k) => k(query(c, "SELECT json FROM versions WHERE id = ? ORDER BY rowid DESC", id.value)(rs => record(rs.getString(1))))
           case Store.Define(kind, k) =>
-            val json = Json.print(Kind.shape.encode(kind))
             val known = query(c, "SELECT 1 FROM kinds WHERE id = ?", kind.id.value)(_ => ()).nonEmpty
-            update(c, "INSERT OR REPLACE INTO kinds (id, name, json) VALUES (?, ?, ?)", kind.id.value, kind.name, json)
-            note(if (known) Event.KindRevised(kind, now()) else Event.KindDefined(kind, now())); k(())
+            putKind(kind)
+            val at = now()
+            note(if (known) Event.KindRevised(kind, at, eid()) else Event.KindDefined(kind, at, eid())); k(())
           case Store.Add(kind, fields, meta, tags, n, k) =>
             val r = Record(RecordId(ids()), VersionId(ids()), None, kind, fields, meta, tags, n, now())
-            insert(r); note(Event.RecordAdded(r)); k(r)
+            insert(r); note(Event.RecordAdded(r, eid())); k(r)
           case Store.Revise(id, fields, meta, tags, n, k) => current(id) match {
             case Some(old) =>
               val r = old.copy(version = VersionId(ids()), parent = Some(old.version), fields = fields, meta = meta, tags = tags, note = n, at = now())
-              insert(r); note(Event.RecordRevised(r)); k(Some(r))
+              insert(r); note(Event.RecordRevised(r, eid())); k(Some(r))
             case None => k(None)
           }
           case Store.Retire(id, reason, k) =>
             val at = now()
-            update(c, "INSERT OR REPLACE INTO retired (id, reason, at) VALUES (?, ?, ?)", id.value, reason, at)
-            note(Event.RecordRetired(id, reason, at)); k(())
-          case Store.Audit(id, field, by, k) => note(Event.Accessed(id, field, by, now())); k(())
+            retire(id, reason, at)
+            note(Event.RecordRetired(id, reason, at, eid())); k(())
+          case Store.Audit(id, field, by, k) => val at = now(); note(Event.Accessed(id, field, by, at, eid())); k(())
+          case Store.Adopt(journal, k) =>
+            val known = query(c, "SELECT json FROM events")(rs => Event.identity(event(rs.getString(1)))).toSet
+            journal.distinctBy(Event.identity).filterNot(e => known(Event.identity(e))).foreach(taken); k(())
           case Store.Journaled(k) =>
             val events = query(c, "SELECT json FROM events ORDER BY seq")(rs => event(rs.getString(1)))
             val unsaved = query(c, "SELECT COUNT(*) FROM events WHERE seq > (SELECT COALESCE(MAX(seq), 0) FROM marks)")(_.getInt(1)).head

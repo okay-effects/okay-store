@@ -4,24 +4,57 @@ import okay.effects.json.Json
 import okay.effects.shape.{Problem, Shape}
 import okay.effects.shape.Shape.{field, int, long, record, sub, sum, text}
 
-/** WHAT HAPPENED, in order: the journal is this, a line a JSON object per event, appended and never rewritten. An
- * access written down (`Accessed`: who saw which field) is part of it, so the audit is the data's own */
-sealed trait Event { def at: Long }
-object Event {
-  final case class KindDefined(kind: Kind, at: Long) extends Event
-  final case class KindRevised(kind: Kind, at: Long) extends Event
-  final case class RecordAdded(record: Record) extends Event { def at: Long = record.at }
-  final case class RecordRevised(record: Record) extends Event { def at: Long = record.at }
-  final case class RecordRetired(id: RecordId, reason: Option[String], at: Long) extends Event
-  final case class Accessed(id: RecordId, field: String, by: String, at: Long) extends Event
+/** an event's identity: minted by the handler from its `ids`; `none` for an event made without one */
+final case class EventId(value: String)
+object EventId {
+  val none: EventId = EventId("")
+  val shape: Shape[EventId] = text.map(EventId(_))(_.value)
+}
 
+/** WHAT HAPPENED, in order: the journal is this, a line a JSON object per event, appended and never rewritten. An
+ * access written down (`Accessed`: who saw which field) is part of it, so the audit is the data's own. Each event has
+ * `eid`, its identity, so a writer appends only what a file lacks */
+sealed trait Event { def at: Long; def eid: EventId }
+object Event {
+  final case class KindDefined(kind: Kind, at: Long, eid: EventId = EventId.none) extends Event
+  final case class KindRevised(kind: Kind, at: Long, eid: EventId = EventId.none) extends Event
+  final case class RecordAdded(record: Record, eid: EventId = EventId.none) extends Event { def at: Long = record.at }
+  final case class RecordRevised(record: Record, eid: EventId = EventId.none) extends Event { def at: Long = record.at }
+  final case class RecordRetired(id: RecordId, reason: Option[String], at: Long, eid: EventId = EventId.none)
+    extends Event
+  final case class Accessed(id: RecordId, field: String, by: String, at: Long, eid: EventId = EventId.none)
+    extends Event
+
+  /** WHO AN EVENT IS: its `eid`, or — an event without one, as a journal written before ids has them — a hash of what
+   * it says, so the same line read twice is the same event */
+  def identity(e: Event): EventId =
+    if (e.eid != EventId.none) e.eid else EventId("h" + fnv(Json.print(shape.encode(e))))
+  /** FNV-1a, 64 bits, as hex: the same on every platform */
+  private def fnv(s: String): String = {
+    var h = 0xcbf29ce484222325L
+    s.foreach { c => h = (h ^ (c & 0xffff).toLong) * 0x100000001b3L }
+    val hex = java.lang.Long.toHexString(h)
+    ("0" * (16 - hex.length)) + hex
+  }
+
+  private val eid = field("eid", EventId.shape).withDefault(EventId.none)
   val shape: Shape[Event] = sum(
-    sub[Event, KindDefined]("kind-defined", record(field("kind", Kind.shape), field("at", long))(KindDefined(_, _))(e => (e.kind, e.at))) { case e: KindDefined => Some(e); case _ => None },
-    sub[Event, KindRevised]("kind-revised", record(field("kind", Kind.shape), field("at", long))(KindRevised(_, _))(e => (e.kind, e.at))) { case e: KindRevised => Some(e); case _ => None },
-    sub[Event, RecordAdded]("record-added", record(field("record", Record.shape))(RecordAdded(_))(_.record)) { case e: RecordAdded => Some(e); case _ => None },
-    sub[Event, RecordRevised]("record-revised", record(field("record", Record.shape))(RecordRevised(_))(_.record)) { case e: RecordRevised => Some(e); case _ => None },
-    sub[Event, RecordRetired]("record-retired", record(field("id", Record.id), field("reason", text.optional), field("at", long))(RecordRetired(_, _, _))(e => (e.id, e.reason, e.at))) { case e: RecordRetired => Some(e); case _ => None },
-    sub[Event, Accessed]("accessed", record(field("id", Record.id), field("field", text), field("by", text), field("at", long))(Accessed(_, _, _, _))(e => (e.id, e.field, e.by, e.at))) { case e: Accessed => Some(e); case _ => None })
+    sub[Event, KindDefined]("kind-defined", record(eid, field("kind", Kind.shape), field("at", long))(
+      (i, k, at) => KindDefined(k, at, i))(e => (e.eid, e.kind, e.at))) {
+      case e: KindDefined => Some(e); case _ => None },
+    sub[Event, KindRevised]("kind-revised", record(eid, field("kind", Kind.shape), field("at", long))(
+      (i, k, at) => KindRevised(k, at, i))(e => (e.eid, e.kind, e.at))) {
+      case e: KindRevised => Some(e); case _ => None },
+    sub[Event, RecordAdded]("record-added", record(eid, field("record", Record.shape))(
+      (i, r) => RecordAdded(r, i))(e => (e.eid, e.record))) { case e: RecordAdded => Some(e); case _ => None },
+    sub[Event, RecordRevised]("record-revised", record(eid, field("record", Record.shape))(
+      (i, r) => RecordRevised(r, i))(e => (e.eid, e.record))) { case e: RecordRevised => Some(e); case _ => None },
+    sub[Event, RecordRetired]("record-retired", record(eid, field("id", Record.id), field("reason", text.optional),
+      field("at", long))((i, id, r, at) => RecordRetired(id, r, at, i))(e => (e.eid, e.id, e.reason, e.at))) {
+      case e: RecordRetired => Some(e); case _ => None },
+    sub[Event, Accessed]("accessed", record(eid, field("id", Record.id), field("field", text), field("by", text),
+      field("at", long))((i, id, f, b, at) => Accessed(id, f, b, at, i))(e => (e.eid, e.id, e.field, e.by, e.at))) {
+      case e: Accessed => Some(e); case _ => None })
 }
 
 /** THE FILE: a header line — the application's format name and version, when it was created — then an event a line.
@@ -57,16 +90,23 @@ final case class Kept(kinds: Map[KindId, Kind], versions: Map[RecordId, List[Rec
   def history(id: RecordId): List[Record] = versions.getOrElse(id, Nil)
   def apply(e: Event): Kept = {
     val next = e match {
-      case Event.KindDefined(k, _) => copy(kinds = kinds.updated(k.id, k))
-      case Event.KindRevised(k, _) => copy(kinds = kinds.updated(k.id, k))
-      case Event.RecordAdded(r) => copy(versions = versions.updated(r.id, List(r)))
-      case Event.RecordRevised(r) => copy(versions = versions.updated(r.id, r :: versions.getOrElse(r.id, Nil)))
-      case Event.RecordRetired(id, _, _) => copy(retired = retired + id)
-      case Event.Accessed(_, _, _, _) => this
+      case Event.KindDefined(k, _, _) => copy(kinds = kinds.updated(k.id, k))
+      case Event.KindRevised(k, _, _) => copy(kinds = kinds.updated(k.id, k))
+      case Event.RecordAdded(r, _) => copy(versions = versions.updated(r.id, List(r)))
+      case Event.RecordRevised(r, _) => copy(versions = versions.updated(r.id, r :: versions.getOrElse(r.id, Nil)))
+      case Event.RecordRetired(id, _, _, _) => copy(retired = retired + id)
+      case _: Event.Accessed => this
     }
     next.copy(events = events :+ e, unsaved = unsaved + 1)
   }
   def saved: Kept = copy(unsaved = 0)
+  /** a journal as written — by this store and by any other writer of the same file — taken in: its fold, an event once
+   * by identity, then this one's own events it lacks, those unsaved */
+  def adopt(journal: List[Event]): Kept = {
+    val once = journal.distinctBy(Event.identity)
+    val known = once.map(Event.identity).toSet
+    events.filterNot(e => known(Event.identity(e))).foldLeft(Kept.of(once, kinds.values.toList))(_ apply _)
+  }
 }
 object Kept {
   /** nothing kept but these kinds, built in */

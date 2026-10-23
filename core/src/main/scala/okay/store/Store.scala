@@ -27,6 +27,9 @@ object Store {
   /** the journal as it stands, and how many events are unsaved */
   final case class Journaled[X](answer: ((List[Event], Int)) => X) extends Store[X]
   final case class Saved[X](answer: Unit => X) extends Store[X]
+  /** a journal as written, by this store and by others, taken in: in memory what is kept becomes its fold, the own
+   * events it lacks after it; on `Data` and a database the events the store lacks are taken in after its own */
+  final case class Adopt[X](journal: List[Event], answer: Unit => X) extends Store[X]
 }
 
 class Stores[F <: Effects with Singleton](implicit implementation: F) {
@@ -46,6 +49,8 @@ class Stores[F <: Effects with Singleton](implicit implementation: F) {
   def audit[R[_]](id: RecordId, field: String, by: String)(implicit in: In[Store, R]): Unit ! R = perform[Store].apply[R, Unit](Store.Audit(id, field, by, x => x))
   def journaled[R[_]](implicit in: In[Store, R]): (List[Event], Int) ! R = perform[Store].apply[R, (List[Event], Int)](Store.Journaled(x => x))
   def saved[R[_]](implicit in: In[Store, R]): Unit ! R = perform[Store].apply[R, Unit](Store.Saved(x => x))
+  def adopt[R[_]](journal: List[Event])(implicit in: In[Store, R]): Unit ! R =
+    perform[Store].apply[R, Unit](Store.Adopt(journal, x => x))
 
   /** THE HANDLER IN MEMORY: what is kept in a cell, in place; ids and the clock given, so a test is deterministic.
    * `find` is `Stores.matches`: by text in the fields' values, the tags and the note, and by a tag */
@@ -54,6 +59,7 @@ class Stores[F <: Effects with Singleton](implicit implementation: F) {
    * while the program still runs (a session that never ends, a test played to a screen) */
   def keeping(initial: Kept, ids: () => String, now: () => Long, seen: Kept => Unit): Keeping = new Keeping(initial, ids, now, seen)
   final class Keeping(initial: Kept, ids: () => String, now: () => Long, seen: Kept => Unit) {
+    private def eid(): EventId = EventId(ids())
     def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Store, R, Rest]): (Kept, A) ! Rest =
       handle[Store, Kept, R, Rest, A, (Kept, A)](p, initial, new StatefulTailHandler[Store, Kept, Rest, A, (Kept, A)] {
         def ret(v: Kept, a: A) = pure((v, a))
@@ -69,20 +75,28 @@ class Stores[F <: Effects with Singleton](implicit implementation: F) {
             case Store.Find(text, tag, answer) => answer(v.records.filter(r => Stores.matches(text, tag, r)))
             case Store.Get(id, answer) => answer(v.current(id))
             case Store.History(id, answer) => answer(v.history(id))
-            case Store.Define(kind, answer) => cell.set(v(if (v.kinds.contains(kind.id)) Event.KindRevised(kind, now()) else Event.KindDefined(kind, now()))); answer(())
+            case Store.Define(kind, answer) =>
+              val at = now()
+              val e = if (v.kinds.contains(kind.id)) Event.KindRevised(kind, at, eid())
+                      else Event.KindDefined(kind, at, eid())
+              cell.set(v(e))
+              answer(())
             case Store.Add(kind, fields, meta, tags, note, answer) =>
               val r = Record(RecordId(ids()), VersionId(ids()), None, kind, fields, meta, tags, note, now())
-              cell.set(v(Event.RecordAdded(r))); answer(r)
+              cell.set(v(Event.RecordAdded(r, eid()))); answer(r)
             case Store.Revise(id, fields, meta, tags, note, answer) => v.current(id) match {
               case Some(old) =>
                 val r = old.copy(version = VersionId(ids()), parent = Some(old.version), fields = fields, meta = meta, tags = tags, note = note, at = now())
-                cell.set(v(Event.RecordRevised(r))); answer(Some(r))
+                cell.set(v(Event.RecordRevised(r, eid()))); answer(Some(r))
               case None => answer(None)
             }
-            case Store.Retire(id, reason, answer) => cell.set(v(Event.RecordRetired(id, reason, now()))); answer(())
-            case Store.Audit(id, field, by, answer) => cell.set(v(Event.Accessed(id, field, by, now()))); answer(())
+            case Store.Retire(id, reason, answer) =>
+              val at = now(); cell.set(v(Event.RecordRetired(id, reason, at, eid()))); answer(())
+            case Store.Audit(id, field, by, answer) =>
+              val at = now(); cell.set(v(Event.Accessed(id, field, by, at, eid()))); answer(())
             case Store.Journaled(answer) => answer((v.events, v.unsaved))
             case Store.Saved(answer) => cell.set(v.saved); answer(())
+            case Store.Adopt(journal, answer) => cell.set(v.adopt(journal)); answer(())
           }
         }
       })
@@ -102,10 +116,15 @@ class Stores[F <: Effects with Singleton](implicit implementation: F) {
     private def kindOf(d: Json): Kind = Kind.shape.decode(d).fold(ps => throw new IllegalStateException(s"a kind does not read: ${okay.effects.shape.Problem.render(ps)}"), k => k)
     private def eventOf(d: Json): Event = Event.shape.decode(d).fold(ps => throw new IllegalStateException(s"an event does not read: ${okay.effects.shape.Problem.render(ps)}"), e => e)
     private def key(seq: Long): String = f"$seq%012d"
+    private def eid(): EventId = EventId(ids())
 
     def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Store, R, Rest], d: In[Data, Rest]): A ! Rest = {
       def note(e: Event): Unit ! Rest = datas.count[Rest]("events").flatMap(n => datas.put[Rest]("events", key(n + 1), withSeq(Event.shape.encode(e), n + 1)))
       def insert(r: Record): Unit ! Rest = datas.count[Rest]("versions").flatMap(n => datas.put[Rest]("versions", r.version.value, withSeq(Record.shape.encode(r), n + 1)))
+      def putKind(kind: Kind): Unit ! Rest = datas.put[Rest]("kinds", kind.id.value, Kind.shape.encode(kind))
+      def retire(id: RecordId, reason: Option[String], at: Long): Unit ! Rest =
+        datas.put[Rest]("retired", id.value,
+          Json.Obj(Vector("at" -> Json.num(at)) ++ reason.map(x => "reason" -> Json.Str(x))))
       def retired: Set[RecordId] ! Rest = datas.query[Rest]("retired").map(_.map { case (k, _) => RecordId(k) }.toSet)
       def current(id: RecordId): Option[Record] ! Rest = retired.flatMap(gone =>
         if (gone(id)) pure[Option[Record], Rest](None)
@@ -123,20 +142,40 @@ class Stores[F <: Effects with Singleton](implicit implementation: F) {
           case Store.Get(id, answer) => current(id).flatMap(r => k(answer(r)))
           case Store.History(id, answer) => datas.query[Rest]("versions", Where.Eq(List("id"), Json.Str(id.value)), List(Order.desc("seq"))).flatMap(vs => k(answer(vs.map { case (_, d) => recordOf(d) })))
           case Store.Define(kind, answer) => datas.get[Rest]("kinds", kind.id.value).flatMap(known =>
-            datas.put[Rest]("kinds", kind.id.value, Kind.shape.encode(kind)).flatMap(_ => note(if (known.isDefined) Event.KindRevised(kind, now()) else Event.KindDefined(kind, now()))).flatMap(_ => k(answer(()))))
+            putKind(kind).flatMap { _ =>
+              val at = now()
+              note(if (known.isDefined) Event.KindRevised(kind, at, eid()) else Event.KindDefined(kind, at, eid()))
+            }.flatMap(_ => k(answer(()))))
           case Store.Add(kind, fields, meta, tags, n, answer) =>
             val r = Record(RecordId(ids()), VersionId(ids()), None, kind, fields, meta, tags, n, now())
-            insert(r).flatMap(_ => note(Event.RecordAdded(r))).flatMap(_ => k(answer(r)))
+            insert(r).flatMap(_ => note(Event.RecordAdded(r, eid()))).flatMap(_ => k(answer(r)))
           case Store.Revise(id, fields, meta, tags, n, answer) => current(id).flatMap {
             case Some(old) =>
               val r = old.copy(version = VersionId(ids()), parent = Some(old.version), fields = fields, meta = meta, tags = tags, note = n, at = now())
-              insert(r).flatMap(_ => note(Event.RecordRevised(r))).flatMap(_ => k(answer(Some(r))))
+              insert(r).flatMap(_ => note(Event.RecordRevised(r, eid()))).flatMap(_ => k(answer(Some(r))))
             case None => k(answer(None))
           }
           case Store.Retire(id, reason, answer) =>
             val at = now()
-            datas.put[Rest]("retired", id.value, Json.Obj(Vector("at" -> Json.num(at)) ++ reason.map(x => "reason" -> Json.Str(x)))).flatMap(_ => note(Event.RecordRetired(id, reason, at))).flatMap(_ => k(answer(())))
-          case Store.Audit(id, field, by, answer) => note(Event.Accessed(id, field, by, now())).flatMap(_ => k(answer(())))
+            retire(id, reason, at).flatMap(_ => note(Event.RecordRetired(id, reason, at, eid())))
+              .flatMap(_ => k(answer(())))
+          case Store.Audit(id, field, by, answer) =>
+            val at = now(); note(Event.Accessed(id, field, by, at, eid())).flatMap(_ => k(answer(())))
+          case Store.Adopt(journal, answer) =>
+            // the journal's events this store lacks, taken in after its own, each as its operation wrote it
+            datas.query[Rest]("events").flatMap { es =>
+              val known = es.map { case (_, d) => Event.identity(eventOf(d)) }.toSet
+              val lacking = journal.distinctBy(Event.identity).filterNot(e => known(Event.identity(e)))
+              lacking.foldLeft(pure[Unit, Rest](()))((acc, e) =>
+                acc.flatMap(_ => (e match {
+                  case Event.KindDefined(kind, _, _) => putKind(kind)
+                  case Event.KindRevised(kind, _, _) => putKind(kind)
+                  case Event.RecordAdded(r, _) => insert(r)
+                  case Event.RecordRevised(r, _) => insert(r)
+                  case Event.RecordRetired(id, reason, at, _) => retire(id, reason, at)
+                  case _: Event.Accessed => pure[Unit, Rest](())
+                }).flatMap(_ => note(e))))
+            }.flatMap(_ => k(answer(())))
           case Store.Journaled(answer) => datas.query[Rest]("events", Where.All, List(Order.by("seq"))).flatMap(es => datas.get[Rest]("marks", "saved").flatMap { mark =>
             val marked = mark.map(seqOf).getOrElse(0L)
             k(answer((es.map { case (_, d) => eventOf(d) }, es.count { case (_, d) => seqOf(d) > marked })))
@@ -190,9 +229,12 @@ object Stores {
   val journaled: Op[Store, Unit, (List[Event], Int)] =
     Op("journaled", unit, record(field("events", Event.shape.many()), field("unsaved", int))((e, n) => (e, n))(x => x), (_: Unit) => Store.Journaled(x => x), Some("the journal, and how many events are unsaved"))
   val saved: Op[Store, Unit, Unit] = Op("saved", unit, unit, (_: Unit) => Store.Saved(x => x), Some("the journal marked saved"), writes = true)
+  val adopt: Op[Store, List[Event], Unit] = Op("adopt", record(field("journal", Event.shape.many()))(j => j)(j => j),
+    unit, (j: List[Event]) => Store.Adopt(j, x => x), Some("a journal as written, by this store and others, taken in"),
+    writes = true)
 
   val describe: Describe[Store] = new Describe[Store]("store") {
-    val operations = List(kinds, find, get, history, define, add, revise, retire, audit, journaled, saved)
+    val operations = List(kinds, find, get, history, define, add, revise, retire, audit, journaled, saved, adopt)
     def split[X](op: Store[X]): Call[X] = op match {
       case Store.Kinds(k) => call(kinds, (), k)
       case Store.Find(t, g, k) => call(find, (t, g), k)
@@ -205,6 +247,7 @@ object Stores {
       case Store.Audit(id, f, b, k) => call(audit, (id, f, b), k)
       case Store.Journaled(k) => call(journaled, (), k)
       case Store.Saved(k) => call(saved, (), k)
+      case Store.Adopt(j, k) => call(adopt, j, k)
     }
   }
 }

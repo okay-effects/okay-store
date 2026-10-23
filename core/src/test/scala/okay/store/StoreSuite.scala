@@ -68,8 +68,62 @@ abstract class StoreChecks(val fx0: Runner, name: String) extends munit.FunSuite
     val remote = fx0.run(domains.remote[Store](Stores.describe).apply[S, Void, (List[Record], List[Record], Int)](transport)(program))
     assertEquals(remote, direct)
     assertEquals(carried.reverse, List("define", "add", "revise", "find", "history", "retire", "journaled"))
-    assertEquals(Stores.describe.operations.size, 11)
+    assertEquals(Stores.describe.operations.size, 12)
   }
 }
+abstract class AdoptChecks(val fx0: Runner, name: String) extends munit.FunSuite {
+  val stores: Stores[fx0.type] = new Stores[fx0.type]()(fx0)
+  import fx0._
+  import stores._
+  type S[X] = Sum[Void, Store, X]
+  import StorePrograms.passport
+  def ids(prefix: String): () => String = { var n = 0; () => { n += 1; s"$prefix$n" } }
+  def adding(number: String): Record ! S =
+    add[S](passport.id, Json.obj("number" -> Json.Str(number), "country" -> Json.Str("UA")))
+
+  test(s"$name: every event its own identity, minted by the handler from its ids") {
+    val (kept, _) = fx0.run(keeping(Kept.empty(List(passport)), ids("a"), () => 7L)(
+      adding("A1").flatMap(r => audit[S](r.id, "number", "owner").flatMap(_ => retire[S](r.id, None)))))
+    assertEquals(kept.events.map(_.eid.value), List("a3", "a4", "a5"))   // after the record's id and version
+    assertEquals(kept.events.map(Event.identity), kept.events.map(_.eid))
+    val lines = Journal.write(Journal.Header("test", 1, 7L), kept.events)
+    assert(lines(1).contains("\"eid\":\"a3\""), lines(1))
+    assertEquals(Journal.read(lines)._2, kept.events)
+  }
+  test(s"$name: a journal without ids reads; its identity a hash of what each event says, the same each time") {
+    val old = List("""{"format":"test","version":1,"created":1}""",
+      """{"type":"accessed","id":"r1","field":"number","by":"owner","at":5}""",
+      """{"type":"accessed","id":"r1","field":"number","by":"owner","at":6}""")
+    val (_, es, damaged) = Journal.read(old)
+    assertEquals(damaged, Nil); assertEquals(es.map(_.eid), List(EventId.none, EventId.none))
+    val first = es.map(Event.identity)
+    assertEquals(Journal.read(old)._2.map(Event.identity), first)
+    assert(first.forall(_.value.startsWith("h")) && first.distinct.size == 2, first.toString)
+  }
+  test(s"$name: adopt: two writers' journals, each taken in by the other — both have both; again, nothing more") {
+    val (a, ra) = fx0.run(keeping(Kept.empty(List(passport)), ids("a"), () => 7L)(adding("A1")))
+    val (b, rb) = fx0.run(keeping(Kept.empty(List(passport)), ids("b"), () => 8L)(adding("B1")))
+    val file = a.events ++ b.events                     // A appended, then B
+    val (b2, _) = fx0.run(keeping(b, ids("b"), () => 9L)(adopt[S](file)))
+    assertEquals(b2.records.map(_.id).toSet, Set(ra.id, rb.id)); assertEquals(b2.events, file)
+    assertEquals(b2.unsaved, 0)
+    // B's alone: A's own kept after it, unsaved
+    val (a2, _) = fx0.run(keeping(a, ids("a"), () => 9L)(adopt[S](b.events)))
+    assertEquals(a2.events, b.events ++ a.events); assertEquals(a2.unsaved, 1)
+    val (a3, _) = fx0.run(keeping(a2, ids("a"), () => 9L)(adopt[S](file ++ file)))
+    assertEquals(a3.events, file); assertEquals(a3.unsaved, 0)   // an event once, by identity
+  }
+  test(s"$name: two revisions of one version from two writers: a fork, both in the history, the later current") {
+    val (base, r) = fx0.run(keeping(Kept.empty(List(passport)), ids("a"), () => 7L)(adding("A1")))
+    def revising(prefix: String, number: String) = fx0.run(keeping(base, ids(prefix), () => 8L)(
+      revise[S](r.id, Json.obj("number" -> Json.Str(number), "country" -> Json.Str("UA")))))._1
+    val (one, two) = (revising("x", "A2"), revising("y", "A3"))
+    val kept = Kept.empty(List(passport)).adopt(one.events ++ two.events)
+    assertEquals(kept.history(r.id).map(_.fields.get("number")), List("A3", "A2", "A1").map(n => Some(Json.Str(n))))
+    assertEquals(kept.history(r.id).map(_.parent), List(Some(r.version), Some(r.version), None))
+  }
+}
+class AdoptOnMachine extends AdoptChecks(Machine, "machine")
+class AdoptOnFree extends AdoptChecks(Free, "free")
 class StoreOnMachine extends StoreChecks(Machine, "machine")
 class StoreOnFree extends StoreChecks(Free, "free")

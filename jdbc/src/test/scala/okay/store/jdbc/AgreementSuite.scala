@@ -45,6 +45,26 @@ abstract class AgreementChecks(val fx0: Runner, name: String) extends munit.FunS
     assertEquals(inMemory._8._2, 8); assertEquals(inMemory._9, 0)
     assertEquals(inMemory._8._1.collect { case e: Event.Accessed => e.by }, List("owner"))
   }
+  test(s"$name: adopt, the same in memory, on SQLite and on Data: a journal of others taken in, again nothing more") {
+    val uuids = () => java.util.UUID.randomUUID().toString
+    val (other, _) = fx0.run(keeping(Kept.empty(List(passport)), uuids, clock())(program))
+    val journal = other.events
+    def taking[R[_]](implicit in: In[Store, R]) = for {
+      _ <- adopt[R](journal); all <- find[R](""); ks <- kinds[R]; j <- journaled[R]
+      _ <- adopt[R](journal); j2 <- journaled[R]
+    } yield (all, ks, j._1, j2._1.size)
+    val (_, inMemory) = fx0.run(keeping(Kept.empty(List(passport)), ids(), clock())(taking[S]))
+    val c = Sqlite.open(":memory:", List(passport))
+    val onSqlite = try fx0.run(jdbcs.on(c, ids(), clock())(taking[S])) finally c.close()
+    val c2 = Sqlite.connect(":memory:")
+    type Taken = (List[Record], List[Kind], List[Event], Int)
+    val onData = try fx0.run(sqls.on(c2)(stores.onData(ids(), clock())[DS, D, Taken](
+      datas.put[DS]("kinds", passport.id.value, Kind.shape.encode(passport)).flatMap(_ => taking[DS]))))
+      finally c2.close()
+    assertEquals(onSqlite, inMemory); assertEquals(onData, inMemory)
+    assertEquals(inMemory._1.map(_.kind.value), List("note")); assertEquals(inMemory._3, journal)
+    assertEquals(inMemory._4, journal.size)
+  }
   test(s"$name: what is written stays: the database reopened answers the same; the marks too") {
     val f = java.io.File.createTempFile("okay-store", ".db"); f.delete()
     val c1 = Sqlite.open(f.getPath, List(passport))

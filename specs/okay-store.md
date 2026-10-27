@@ -201,8 +201,19 @@ a revision, an audit, finds by text, by tag, by both, the history, a retirement,
 SQLite and compares every answer, on the machine and on Free; and reopens a database file to find what was written.
 `Class.forName` loads the driver: sbt's class loader does not always serve it to `DriverManager`.
 
-Not done: transactions across operations (each statement is its own; a `Saved` could become a commit under a
-connection with autocommit off), other databases (the SQL is plain enough for H2 or Postgres with `instr` swapped).
+TRANSACTIONS ACROSS OPERATIONS (2026-10-27): `Jdbcs.atomically(connection, ids, now)` — the store's operations in one
+transaction of the database, begun at the first, committed when the program ends; ended early, nothing written (the
+next `atomically` on the connection rolls it back), as `Sqls.atomically` for `Data`. A record added and its event are
+one write. Checked on SQLite. Not done: other databases for the store itself (the SQL is plain enough for H2 or
+Postgres with `instr` swapped) — `Data` on Postgres already serves every domain.
+
+## SQL as text (2026-10-27)
+
+The dialects and `Data`'s statements are `core`'s (`okay.store.Dialect`, `okay.store.SqlData`): plain text and SQL's
+own arguments (`SqlArg`: text, a whole number, a real, null), no connection — so whatever runs SQL runs them, on any
+platform: JDBC on the JVM (`jdbc`, which binds them its way), D1 and Postgres from a Worker or a Lambda
+(okay-serverless). `jdbc`'s `Dialect` is the same value, named there as before; its tests compare every form with the
+reference, on SQLite and Postgres; `SqlDataSuite` says the text on every platform.
 
 ## Not here
 

@@ -16,8 +16,17 @@ ThisBuild / version := "0.1.0-SNAPSHOT"
 ThisBuild / licenses := List("Apache-2.0" -> url("https://www.apache.org/licenses/LICENSE-2.0.txt"))
 ThisBuild / scalaVersion := scala3
 ThisBuild / resolvers += "okay-effects" at "https://okay-effects.github.io/okay-simple/maven"
-/** okay-simple's snapshot (json, shape, describe), published locally until released */
-val okayEffects = "0.1.1-SNAPSHOT"
+/** okay-simple (json, shape, describe), from its Pages repository */
+val okayEffects = "0.1.1"
+
+/** RELEASES, ON GITHUB PAGES: `sbt -Dplatforms=jvm,js,native publishPages` writes every published module, for both
+ * compilers and every platform asked, as a Maven repository into `target/pages-maven/`; that directory goes to the
+ * `gh-pages` branch under `maven/`, served at https://okay-effects.github.io/okay-store/maven (RELEASING.md) */
+val pagesRepository = settingKey[File]("the Maven repository a release is written to, for GitHub Pages")
+ThisBuild / pagesRepository := (ThisBuild / baseDirectory).value / "target" / "pages-maven"
+ThisBuild / publishTo := Some(MavenCache("pages", (ThisBuild / pagesRepository).value))
+/** no API documentation jars, as okay-simple: the sources jars are published, which IDEs read for the documentation */
+ThisBuild / Compile / packageDoc / publishArtifact := false
 
 def crossBuilt: Seq[Def.Setting[?]] = Seq(
   crossScalaVersions := Seq(scala3, scala2),
@@ -44,11 +53,16 @@ lazy val core = crossBoth("core", "core").settings(name := "okay-store",
   .settings(libraryDependencies ++= (if (scalaVersion.value.startsWith("2")) Seq("org.scala-lang" % "scala-reflect" % scalaVersion.value % Provided) else Nil))
   .jvmSettings(Compile / unmanagedSourceDirectories += baseDirectory.value.getParentFile / "src" / "main" / "scala-jvm")
 
-/** ON A DATABASE: `Data` on JDBC by a dialect (SQLite checked, Postgres sketched), and the store directly on SQLite; the JVM */
+/** ON A DATABASE: `Data` on JDBC by a dialect (SQLite and Postgres checked), and the store directly on SQLite; the JVM */
 lazy val jdbc = (project in file("jdbc")).dependsOn(core.jvm % "compile->compile;test->test").settings(crossBuilt, name := "okay-store-jdbc",
   libraryDependencies ++= Seq("org.xerial" % "sqlite-jdbc" % "3.47.1.0",
     "org.postgresql" % "postgresql" % "42.7.4" % Test,
     "io.github.okay-effects" %% "okay-effects-machine" % okayEffects % Test,
     "io.github.okay-effects" %% "okay-effects-free" % okayEffects % Test))
 
-lazy val root = (project in file(".")).aggregate(core.jvm, jdbc).settings(name := "okay-store-root", publish / skip := true)
+lazy val root = (project in file("."))
+  .aggregate((core.projects.values.map(p => p: ProjectReference).toSeq :+ (jdbc: ProjectReference)): _*)
+  .settings(name := "okay-store-root", publish / skip := true, crossScalaVersions := Nil)
+
+/** a release into `target/pages-maven/`, on Scala 3.3 and 2.13 */
+addCommandAlias("publishPages", "; ++3.3.8 publish ; ++2.13.18 publish ; ++3.3.8")

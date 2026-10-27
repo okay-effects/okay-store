@@ -38,6 +38,22 @@ object Jdbc {
     kinds.foreach(k => update(c, "INSERT OR IGNORE INTO kinds (id, name, json) VALUES (?, ?, ?)", k.id.value, k.name, Json.print(Kind.shape.encode(k))))
   }
 
+  /** a value as JDBC takes it */
+  def arg(a: okay.store.SqlArg): Any = a match {
+    case okay.store.SqlArg.Text(s) => s
+    case okay.store.SqlArg.Whole(n) => java.lang.Long.valueOf(n)
+    case okay.store.SqlArg.Real(d) => java.lang.Double.valueOf(d)
+    case okay.store.SqlArg.Null => None
+  }
+  /** a statement run, how many rows it changed */
+  def run(c: Connection, s: okay.store.SqlStatement): Int = update(c, s.sql, s.args.map(arg): _*)
+  /** a statement's rows */
+  def rows[A](c: Connection, s: okay.store.SqlStatement)(row: ResultSet => A): List[A] = query(c, s.sql, s.args.map(arg): _*)(row)
+  /** the sequences' table, made where absent; the next key of one, a table per type's too */
+  def keysTable(c: Connection, dialect: okay.store.Dialect): Unit = { run(c, okay.store.SqlData.keys(dialect)); () }
+  def fresh(c: Connection, dialect: okay.store.Dialect, name: String): String =
+    okay.store.Data.key(rows(c, okay.store.SqlData.fresh(dialect, name))(_.getLong(1)).head)
+
   def update(c: Connection, sql: String, params: Any*): Int = { val s = bound(c, sql, params); try s.executeUpdate() finally s.close() }
   def query[A](c: Connection, sql: String, params: Any*)(row: ResultSet => A): List[A] = {
     val s = bound(c, sql, params)
@@ -65,8 +81,12 @@ class Jdbcs[F <: Effects with Singleton](implicit implementation: F) {
   import fx._
 
   /** the handler over a connection; ids and the clock given, as the handler in memory takes them */
-  def on(c: Connection, ids: () => String, now: () => Long): On = new On(c, ids, now)
-  final class On(c: Connection, ids: () => String, now: () => Long) {
+  def on(c: Connection, ids: () => String, now: () => Long): On = new On(c, ids, now, None)
+  /** ATOMICALLY, THE DATABASE'S OWN: the store's operations in one transaction of the database — begun at the first,
+   * committed when `p` ends; what ends `p` before leaves it open, and the next `atomically` on the connection (or its
+   * closing) rolls it back, as `Sqls.atomically` for `Data`. A record added and an event noted are one write */
+  def atomically(c: Connection, ids: () => String, now: () => Long): On = new On(c, ids, now, Some(new Transaction(c)))
+  final class On(c: Connection, ids: () => String, now: () => Long, transaction: Option[Transaction]) {
     import Jdbc._
     private val currentSql = "SELECT v.json FROM versions v WHERE v.rowid = (SELECT MAX(rowid) FROM versions w WHERE w.id = v.id) AND v.id NOT IN (SELECT id FROM retired)"
     private def current(id: RecordId): Option[Record] = query(c, currentSql + " AND v.id = ?", id.value)(rs => record(rs.getString(1))).headOption
@@ -99,8 +119,10 @@ class Jdbcs[F <: Effects with Singleton](implicit implementation: F) {
 
     def apply[R[_], Rest[_], A](p: A ! R)(implicit sp: Split[Store, R, Rest]): A ! Rest =
       handle[Store, R, Rest, A, A](p, new TailHandler[Store, Rest, A, A] {
-        def ret(a: A) = pure(a)
-        def answer[X](op: Store[X]): X = op match {
+        def ret(a: A) = { transaction.foreach(_.commit()); pure(a) }
+        def answer[X](op: Store[X]): X = { transaction.foreach(_.begin()); answered(op) }
+      })
+    private def answered[X](op: Store[X]): X = op match {
           case Store.Kinds(k) => k(query(c, "SELECT json FROM kinds ORDER BY name")(rs => kind(rs.getString(1))))
           case Store.Find(text, tag, k) =>
             val t = text.trim.toLowerCase
@@ -142,8 +164,16 @@ class Jdbcs[F <: Effects with Singleton](implicit implementation: F) {
           case Store.Saved(k) =>
             update(c, "DELETE FROM marks"); update(c, "INSERT INTO marks (seq) SELECT COALESCE(MAX(seq), 0) FROM events"); k(())
         }
-      })
   }
+}
+
+/** A CONNECTION'S TRANSACTION: begun at the first operation, committed at the end; one left open by a program that
+ * ended early is rolled back by the next `begin` */
+final class Transaction(c: Connection) {
+  @volatile private var open = false
+  def begin(): Unit = synchronized { if (!open) { if (!c.getAutoCommit) c.rollback() else c.setAutoCommit(false); open = true } }
+  def commit(): Unit = synchronized { if (open) { c.commit(); c.setAutoCommit(true); open = false } }
+  def rollback(): Unit = synchronized { if (open) { c.rollback(); c.setAutoCommit(true); open = false } }
 }
 object Jdbcs {
   def apply()(implicit fx: Effects): Jdbcs[fx.type] = { implicit val exact: fx.type = fx; new Jdbcs[fx.type] }

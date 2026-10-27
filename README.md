@@ -22,10 +22,23 @@ agreement tests say the backends answer alike.
 
 `okay-store-jdbc` is also the same effect on a database directly: `Sqlite.open(path, kinds)` and `Jdbcs.on(connection, ids, clock)`, a
 row per version with the record's JSON beside the columns a query needs, the events table the journal; the agreement
-test runs one program on both handlers and gets the same answers.
+test runs one program on both handlers and gets the same answers. `Jdbcs.atomically` makes a program's operations one
+transaction of the database.
+
+The SQL itself is text in `core` (`Dialect.sqlite`, `Dialect.postgres`, `SqlData`) — no connection, every platform:
+JDBC runs it here, and [okay-serverless](https://github.com/okay-effects/okay-serverless) runs it on D1 and Postgres
+from Workers and Lambdas.
 
 Scala 3.3 LTS and 2.13, one source; the JVM, Scala.js and Scala Native (`jdbc` the JVM). On [okay-simple](https://github.com/okay-effects/okay-simple)
 alone. The first application is [verity](https://github.com/okay-effects/verity).
+
+```scala-sbt
+resolvers ++= Seq("okay-effects" at "https://okay-effects.github.io/okay-simple/maven",
+  "okay-store" at "https://okay-effects.github.io/okay-store/maven")
+libraryDependencies += "io.github.okay-effects" %%% "okay-store" % "0.1.0"   // and okay-store-jdbc, the JVM
+```
+
+Releases: [RELEASING.md](RELEASING.md).
 
 ```scala
 val stores = new Stores[Machine.type]()(Machine)

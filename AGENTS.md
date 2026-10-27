@@ -19,6 +19,9 @@ Read before anything else; then `specs/okay-store.md`.
   semantics (`Where.holds`, `Order.select`); backends as values (`Memory`, `Lines`, `Sql` in `jdbc` by a `Dialect`) handled by `Datas.on`; `Transaction` over any. A domain's
   handler is a translation into `Data` over typed collections; the direct handlers are the particular mappings. A
   backend is right when it answers as the reference on the same documents — the tests say so, not the backend.
+- SQL is text in `core` (`Dialect`, `SqlData`, `SqlArg`): no connection, every platform — `jdbc` runs it by JDBC,
+  okay-serverless by D1 and Postgres drivers. A dialect's change is `core`'s.
+- Releases on GitHub Pages: RELEASING.md (okay-simple from its Pages, never a snapshot).
 - `jdbc/`: the same effect on a database, the JVM; SQLite always, Postgres when `OKAY_PG=jdbc:postgresql://host:port/db?user=u&password=p`
   names one (`docker run -d --rm --name okay-store-pg -e POSTGRES_PASSWORD=okay -e POSTGRES_USER=okay -e POSTGRES_DB=okay -p 127.0.0.1:15432:5432 postgres:17-alpine`); a handler never changes what an operation means — the
   agreement test (`AgreementSuite`) runs one program in memory and on SQLite and compares every answer.

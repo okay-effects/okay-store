@@ -206,6 +206,26 @@ abstract class AgreementChecks(val fx0: Runner, name: String) extends munit.FunS
       assertEquals(fx0.run(sqls.atomically(c)[D, Void, Long](datas.count[D]("t"))), 1L, "rolled back by the next")
     } finally c.close()
   }
+  test(s"$name: the store atomically on SQLite: its operations one transaction, none written when it ends early") {
+    import fx0.std._
+    type Er2[X] = Sum[Void, ({ type L[x] = Error[String, x] })#L, X]
+    type SE[X] = Sum[Er2, okay.store.Store, X]
+    val c = Sqlite.open(":memory:", List(passport))
+    val (next, now) = (ids(), clock())
+    try {
+      val fields = Json.obj("number" -> Json.Str("X1"), "country" -> Json.Str("UA"))
+      val r = fx0.run(jdbcs.atomically(c, next, now)[S, Void, Record](add[S](passport.id, fields)))
+      assert(c.getAutoCommit, "committed, the connection back to autocommit")
+      val early = fx0.run(attempt[String](jdbcs.atomically(c, next, now)[SE, Er2, Unit](
+        add[SE](passport.id, fields).flatMap(_ => raise[String, SE, Unit]("no")))))
+      assertEquals(early, Left("no"))
+      val (all, events) = fx0.run(jdbcs.atomically(c, next, now)[S, Void, (List[Record], Int)](
+        find[S]("").flatMap(rs => journaled[S].map(j => (rs, j._1.size)))))
+      assertEquals(all.map(_.id), List(r.id), "the second add rolled back by the next transaction")
+      assertEquals(events, 1, "its event with it")
+    } finally c.close()
+  }
+
 }
 class AgreementOnMachine extends AgreementChecks(Machine, "machine")
 class AgreementOnFree extends AgreementChecks(Free, "free")

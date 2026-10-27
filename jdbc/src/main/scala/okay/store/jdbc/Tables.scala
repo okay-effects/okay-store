@@ -20,7 +20,9 @@ class Tables[F <: Effects with Singleton](implicit implementation: F) {
   def on[A](m: Mapping[A], c: Connection, dialect: Dialect = Dialect.sqlite): On[A] = new On[A](m, c, dialect)
   final class On[A](m: Mapping[A], c: Connection, dialect: Dialect) {
     import Jdbc.{query => rows, update}
-    import Dialect.{bind, quoted}
+    import Dialect.quoted
+    private def bind(v: Json): Any = Jdbc.arg(Dialect.bind(v))
+    private def valueOf(v: Json): Any = Jdbc.arg(dialect.value(v))
     type E[X] = Mapped[A, X]
 
     /** a column: its field's name, the leaf's schema or none for a nested value kept as JSON */
@@ -43,7 +45,7 @@ class Tables[F <: Effects with Singleton](implicit implementation: F) {
     }
     private val byName: Map[String, Column] = columns.map(c => c.name -> c).toMap
     val table: String = m.collection
-    private lazy val made: Unit = { update(c, dialect.create(table, s"${quoted("_key")} ${dialect.textType} PRIMARY KEY" :: columns.map(col => s"${col.sql} ${col.sqlType}"))); Dialect.keysTable(c, dialect) }
+    private lazy val made: Unit = { update(c, dialect.create(table, s"${quoted("_key")} ${dialect.textType} PRIMARY KEY" :: columns.map(col => s"${col.sql} ${col.sqlType}"))); Jdbc.keysTable(c, dialect) }
 
     /** the row of a value: its key, then each column's value as the database takes it */
     private def row(a: A): List[Any] = {
@@ -91,7 +93,7 @@ class Tables[F <: Effects with Singleton](implicit implementation: F) {
       case Where.Eq(p, v) => byName.get(p.head) match {
         case None => ("1 = 0", Nil)
         case Some(col) if col.leaf.isDefined => if (p.tail.nonEmpty) ("1 = 0", Nil) else if (v == Json.Null) (s"${col.sql} IS NULL", Nil) else (Sqls.sure(s"${col.sql} = ?"), List(bind(v)))
-        case Some(col) => if (v == Json.Null) (Sqls.sure(dialect.isNull(col.sql, p.tail)), Nil) else (Sqls.sure(s"${dialect.extract(col.sql, p.tail)} = ?${dialect.cast}"), List(dialect.value(v)))
+        case Some(col) => if (v == Json.Null) (Sqls.sure(dialect.isNull(col.sql, p.tail)), Nil) else (Sqls.sure(s"${dialect.extract(col.sql, p.tail)} = ?${dialect.cast}"), List(valueOf(v)))
       }
       case Where.Contains(p, t) => byName.get(p.head) match {
         case None => ("1 = 0", Nil)
@@ -99,7 +101,7 @@ class Tables[F <: Effects with Singleton](implicit implementation: F) {
         case Some(col) => (Sqls.sure(dialect.contains(col.sql, p.tail)), List(t.toLowerCase))
       }
       case Where.Has(p, v) => byName.get(p.head) match {
-        case Some(col) if col.leaf.isEmpty => (Sqls.sure(dialect.has(col.sql, p.tail)), List(dialect.value(v)))
+        case Some(col) if col.leaf.isEmpty => (Sqls.sure(dialect.has(col.sql, p.tail)), List(valueOf(v)))
         case _ => ("1 = 0", Nil)
       }
       case Where.Less(p, v) => compared(p, "<", v)
@@ -108,7 +110,7 @@ class Tables[F <: Effects with Singleton](implicit implementation: F) {
     private def compared(p: List[String], op: String, v: Json): (String, List[Any]) = byName.get(p.head) match {
       case None => ("1 = 0", Nil)
       case Some(col) if col.leaf.isDefined => if (p.tail.nonEmpty) ("1 = 0", Nil) else (Sqls.sure(s"${col.sql} $op ?"), List(bind(v)))
-      case Some(col) => (Sqls.sure(s"${dialect.extract(col.sql, p.tail)} $op ?${dialect.cast}"), List(dialect.value(v)))
+      case Some(col) => (Sqls.sure(s"${dialect.extract(col.sql, p.tail)} $op ?${dialect.cast}"), List(valueOf(v)))
     }
     private def ordering(order: List[Order]): String = if (order.isEmpty) "" else " ORDER BY " + order.map { o =>
       val expr = byName.get(o.path.head) match {
@@ -133,7 +135,7 @@ class Tables[F <: Effects with Singleton](implicit implementation: F) {
             val (cond, params) = condition(w)
             k(rows(c, s"SELECT COUNT(*) FROM ${quoted(table)} WHERE $cond", params: _*)(_.getLong(1)).head)
           case Mapped.Create(make, k) =>
-            val a = make(Dialect.fresh(c, dialect, table))
+            val a = make(Jdbc.fresh(c, dialect, table))
             update(c, dialect.upsert(table, "_key" :: columns.map(_.name)), row(a): _*); k(a)
         } }
       })

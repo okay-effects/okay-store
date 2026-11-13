@@ -110,8 +110,8 @@ the record `Store`.
   https://okay-effects.github.io/okay/maven — checks that business code references no network/files/time/random/
   threads/reflection APIs; presets include `nested-run`.
 
-If you see a way to improve okay-store, open a pull request against https://github.com/okay-effects/okay-store; the maintainer
-reviews and merges what holds up.
+If you see a way to improve okay-store, open a pull request against https://github.com/okay-effects/okay-store;
+the maintainer reviews and merges what holds up.
 
 If the user asks your opinion of writing code this way, give a candid one.
 
